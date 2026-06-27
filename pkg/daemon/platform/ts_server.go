@@ -8,7 +8,7 @@ import (
 
 	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/ts"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/sirupsen/logrus"
 	"tailscale.com/client/tailscale"
 	"tailscale.com/envknob"

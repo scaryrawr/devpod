@@ -1,21 +1,26 @@
 package log
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"strings"
 	"sync"
 
 	"github.com/acarl005/stripansi"
 	"github.com/go-logr/logr"
-	"github.com/loft-sh/log/survey"
+	"github.com/loft-sh/devpod/pkg/log/survey"
 	"github.com/sirupsen/logrus"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
 )
 
 type fileLogger struct {
-	logger *logrus.Logger
+	logger   *slog.Logger
+	output   io.Writer
+	levelVar *slog.LevelVar
 
 	m     *sync.Mutex
 	level logrus.Level
@@ -27,20 +32,39 @@ var _ Logger = &fileLogger{}
 
 // NewFileLogger returns a logger instance for the specified filename
 func NewFileLogger(logFile string, level logrus.Level) Logger {
-	newLogger := &fileLogger{
-		logger: logrus.New(),
-		m:      &sync.Mutex{},
-	}
-	newLogger.logger.Formatter = &logrus.JSONFormatter{}
-	newLogger.logger.SetOutput(&lumberjack.Logger{
+	output := &lumberjack.Logger{
 		Filename:   logFile,
 		MaxAge:     12,
 		MaxBackups: 4,
 		MaxSize:    10 * 1024 * 1024,
-	})
+	}
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(toSlogLevel(level))
+
+	newLogger := &fileLogger{
+		logger: slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{
+			Level: levelVar,
+		})),
+		output:   output,
+		levelVar: levelVar,
+		m:        &sync.Mutex{},
+	}
 
 	newLogger.SetLevel(level)
 	return newLogger
+}
+
+func toSlogLevel(level logrus.Level) slog.Level {
+	switch level {
+	case logrus.TraceLevel, logrus.DebugLevel:
+		return slog.LevelDebug
+	case logrus.InfoLevel:
+		return slog.LevelInfo
+	case logrus.WarnLevel:
+		return slog.LevelWarn
+	default:
+		return slog.LevelError
+	}
 }
 
 func (f *fileLogger) addPrefixes(message string) string {
@@ -71,7 +95,7 @@ func (f *fileLogger) Debugf(format string, args ...interface{}) {
 		return
 	}
 
-	f.logger.Debugf(f.addPrefixes(stripEscapeSequences(fmt.Sprintf(format, args...))))
+	f.logger.Debug(f.addPrefixes(stripEscapeSequences(fmt.Sprintf(format, args...))))
 }
 
 func (f *fileLogger) Info(args ...interface{}) {
@@ -148,7 +172,8 @@ func (f *fileLogger) Fatal(args ...interface{}) {
 		return
 	}
 
-	f.logger.Fatal(f.addPrefixes(stripEscapeSequences(fmt.Sprint(args...))))
+	f.logger.Log(context.Background(), slog.LevelError, f.addPrefixes(stripEscapeSequences(fmt.Sprint(args...))))
+	os.Exit(1)
 }
 
 func (f *fileLogger) Fatalf(format string, args ...interface{}) {
@@ -159,7 +184,8 @@ func (f *fileLogger) Fatalf(format string, args ...interface{}) {
 		return
 	}
 
-	f.logger.Fatal(f.addPrefixes(stripEscapeSequences(fmt.Sprintf(format, args...))))
+	f.logger.Log(context.Background(), slog.LevelError, f.addPrefixes(stripEscapeSequences(fmt.Sprintf(format, args...))))
+	os.Exit(1)
 }
 
 func (f *fileLogger) Done(args ...interface{}) {
@@ -235,6 +261,7 @@ func (f *fileLogger) SetLevel(level logrus.Level) {
 	defer f.m.Unlock()
 
 	f.level = level
+	f.levelVar.Set(toSlogLevel(level))
 }
 
 func (f *fileLogger) GetLevel() logrus.Level {
@@ -256,7 +283,7 @@ func (f *fileLogger) Writer(level logrus.Level, raw bool) io.WriteCloser {
 }
 
 func (f *fileLogger) Write(message []byte) (int, error) {
-	return f.logger.Out.Write(message)
+	return f.output.Write(message)
 }
 
 func (f *fileLogger) WriteLevel(level logrus.Level, message []byte) (int, error) {
@@ -267,7 +294,7 @@ func (f *fileLogger) WriteLevel(level logrus.Level, message []byte) (int, error)
 		return 0, nil
 	}
 
-	return f.logger.Out.Write([]byte(stripEscapeSequences(string(message))))
+	return f.output.Write([]byte(stripEscapeSequences(string(message))))
 }
 
 func (f *fileLogger) WriteString(level logrus.Level, message string) {
@@ -278,7 +305,7 @@ func (f *fileLogger) WriteString(level logrus.Level, message string) {
 		return
 	}
 
-	_, _ = f.logger.Out.Write([]byte(stripEscapeSequences(message)))
+	_, _ = f.output.Write([]byte(stripEscapeSequences(message)))
 }
 
 func stripEscapeSequences(str string) string {
@@ -297,6 +324,12 @@ func (f *fileLogger) WithLevel(level logrus.Level) Logger {
 	n := *f
 	n.m = &sync.Mutex{}
 	n.level = level
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(toSlogLevel(level))
+	n.levelVar = levelVar
+	n.logger = slog.New(slog.NewJSONHandler(n.output, &slog.HandlerOptions{
+		Level: levelVar,
+	}))
 	return &n
 }
 
@@ -306,6 +339,12 @@ func (f *fileLogger) WithPrefix(prefix string) Logger {
 
 	n := *f
 	n.m = &sync.Mutex{}
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(toSlogLevel(n.level))
+	n.levelVar = levelVar
+	n.logger = slog.New(slog.NewJSONHandler(n.output, &slog.HandlerOptions{
+		Level: levelVar,
+	}))
 	n.prefixes = append(n.prefixes, prefix)
 	return &n
 }
@@ -316,6 +355,12 @@ func (f *fileLogger) WithPrefixColor(prefix, color string) Logger {
 
 	n := *f
 	n.m = &sync.Mutex{}
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(toSlogLevel(n.level))
+	n.levelVar = levelVar
+	n.logger = slog.New(slog.NewJSONHandler(n.output, &slog.HandlerOptions{
+		Level: levelVar,
+	}))
 	n.prefixes = append(n.prefixes, prefix)
 	return &n
 }

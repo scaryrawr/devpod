@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	"github.com/loft-sh/devpod/pkg/credentials"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform/client"
-	"github.com/loft-sh/log"
 )
 
 func GetLoftConfig(context, provider string, port int, logger log.Logger) (*client.Config, error) {
@@ -18,7 +18,7 @@ func GetLoftConfig(context, provider string, port int, logger log.Logger) (*clie
 
 	rawJson, err := json.Marshal(request)
 	if err != nil {
-		logger.Errorf("Error parsing request: %w", err)
+		logger.Errorf("Error parsing request: %v", err)
 		return nil, err
 	}
 

@@ -22,7 +22,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/provider"
 	sshServer "github.com/loft-sh/devpod/pkg/ssh/server"
 	"github.com/loft-sh/devpod/pkg/ts"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	perrors "github.com/pkg/errors"
 	"github.com/skratchdot/open-golang/open"
 	"golang.org/x/crypto/ssh"

@@ -29,6 +29,7 @@
 - This repository vendors Go dependencies. Preserve `GOFLAGS=-mod=vendor` when matching CI, and avoid changing vendored code unless explicitly updating dependencies.
 - The canonical Go module declares Go 1.26.3; keep GitHub workflow Go versions in sync when changing the module directive.
 - Errors are generally returned with context using `fmt.Errorf("...: %w", err)` or `github.com/pkg/errors` wrappers; CLI execution centralizes final logging and process exit handling in `cmd.Execute()`.
+- Logging goes through the internal `github.com/loft-sh/devpod/pkg/log` package and its subpackages; do not import `github.com/loft-sh/log`. Logger format methods are for printing only, so use `%v` for logged errors and reserve `%w` for returned/wrapped errors.
 - Global CLI flags are created once in `cmd/flags` and passed into commands. Commands should respect `--debug`, `--silent`, `--context`, `--provider`, and `--devpod-home` through the existing `GlobalFlags` plumbing.
 - Provider options often use custom JSON-friendly helper types such as `types.StrBool` and `types.StrArray`; reuse those when adding provider YAML-backed fields.
 - E2E tests use Ginkgo labels through helper wrappers like `DevPodDescribe("[label] ...")`; choose labels that match the CI matrix (`build`, `ide`, `integration`, `machine`, `machineprovider`, `provider`, `ssh`, `up`, `up-docker`, `up-podman`, `up-docker-compose`, `up-docker-build`, `up-docker-compose-build`, `context`).

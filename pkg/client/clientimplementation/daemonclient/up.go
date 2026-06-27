@@ -17,7 +17,7 @@ import (
 	devpodlog "github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform"
 	"github.com/loft-sh/devpod/pkg/platform/kube"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 

@@ -6,7 +6,7 @@ import (
 
 	"github.com/loft-sh/devpod/pkg/netstat"
 	devssh "github.com/loft-sh/devpod/pkg/ssh"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"golang.org/x/crypto/ssh"
 )
 

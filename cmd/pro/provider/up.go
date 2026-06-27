@@ -12,7 +12,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/platform"
 	"github.com/loft-sh/devpod/pkg/platform/client"
 	"github.com/loft-sh/devpod/pkg/platform/remotecommand"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 

@@ -24,7 +24,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/platform"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/stdio"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/moby/patternmatcher/ignorefile"
 	perrors "github.com/pkg/errors"
 	"google.golang.org/grpc"

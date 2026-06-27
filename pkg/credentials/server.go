@@ -11,7 +11,7 @@ import (
 	"strconv"
 
 	"github.com/loft-sh/devpod/pkg/agent/tunnel"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/pkg/errors"
 )
 
@@ -139,7 +139,7 @@ func handleGitSSHSignatureRequest(ctx context.Context, writer http.ResponseWrite
 	log.Debugf("Received git ssh signature post data: %s", string(out))
 	response, err := client.GitSSHSignature(ctx, &tunnel.Message{Message: string(out)})
 	if err != nil {
-		log.Errorf("Error receiving git ssh signature: %w", err)
+		log.Errorf("Error receiving git ssh signature: %v", err)
 		return errors.Wrap(err, "get git ssh signature")
 	}
 
@@ -159,7 +159,7 @@ func handleLoftPlatformCredentialsRequest(ctx context.Context, writer http.Respo
 	log.Debugf("Received loft platform credentials post data: %s", string(out))
 	response, err := client.LoftConfig(ctx, &tunnel.Message{Message: string(out)})
 	if err != nil {
-		log.Errorf("Error receiving platform credentials: %w", err)
+		log.Errorf("Error receiving platform credentials: %v", err)
 		return errors.Wrap(err, "get platform credentials")
 	}
 
@@ -173,7 +173,7 @@ func handleLoftPlatformCredentialsRequest(ctx context.Context, writer http.Respo
 func handleGPGPublicKeysRequest(ctx context.Context, writer http.ResponseWriter, request *http.Request, client tunnel.TunnelClient, log log.Logger) error {
 	response, err := client.GPGPublicKeys(ctx, &tunnel.Message{})
 	if err != nil {
-		log.Errorf("Error receiving gpg public keys: %w", err)
+		log.Errorf("Error receiving gpg public keys: %v", err)
 		return errors.Wrap(err, "get gpg public keys")
 	}
 

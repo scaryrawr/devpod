@@ -21,7 +21,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/options"
 	platformclient "github.com/loft-sh/devpod/pkg/platform/client"
 	"github.com/loft-sh/devpod/pkg/provider"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	perrors "github.com/pkg/errors"
 )
 

@@ -7,8 +7,8 @@ import (
 
 	"github.com/loft-sh/devpod/pkg/config"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log/survey"
-	"github.com/loft-sh/log/terminal"
+	"github.com/loft-sh/devpod/pkg/log/survey"
+	"github.com/loft-sh/devpod/pkg/log/terminal"
 	"github.com/pkg/errors"
 )
 

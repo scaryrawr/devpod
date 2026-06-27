@@ -13,7 +13,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/options"
 	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )

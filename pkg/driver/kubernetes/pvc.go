@@ -76,7 +76,7 @@ func (k *KubernetesDriver) buildPersistentVolumeClaim(
 	annotations[DevPodInfoAnnotation] = containerInfo
 	extraAnnotations, err := parseLabels(k.options.PvcAnnotations)
 	if err != nil {
-		k.Log.Error("Failed to parse annotations from PVC_ANNOTATIONS option: %v", err)
+		k.Log.Errorf("Failed to parse annotations from PVC_ANNOTATIONS option: %v", err)
 	}
 	for k, v := range extraAnnotations {
 		annotations[k] = v

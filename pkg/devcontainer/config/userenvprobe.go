@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/loft-sh/devpod/pkg/shell"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 )
 
 type UserEnvProbe string

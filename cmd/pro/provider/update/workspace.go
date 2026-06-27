@@ -13,8 +13,8 @@ import (
 	"github.com/loft-sh/devpod/pkg/platform/client"
 	"github.com/loft-sh/devpod/pkg/platform/form"
 	"github.com/loft-sh/devpod/pkg/platform/project"
-	"github.com/loft-sh/log"
-	"github.com/loft-sh/log/terminal"
+	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/log/terminal"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

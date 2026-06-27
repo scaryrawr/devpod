@@ -8,12 +8,12 @@ import (
 
 	managementv1 "github.com/loft-sh/api/v4/pkg/apis/management/v1"
 	"github.com/loft-sh/devpod/cmd/pro/flags"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform"
 	"github.com/loft-sh/devpod/pkg/platform/client"
 	"github.com/loft-sh/devpod/pkg/platform/labels"
 	"github.com/loft-sh/devpod/pkg/platform/project"
 	"github.com/loft-sh/devpod/pkg/provider"
-	"github.com/loft-sh/log"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -67,7 +67,7 @@ func (cmd *WorkspacesCmd) Run(ctx context.Context) error {
 		ns := project.ProjectNamespace(p.GetName())
 		workspaceList, err := managementClient.Loft().ManagementV1().DevPodWorkspaceInstances(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			cmd.log.Info("list workspaces in project \"%s\": %w", p.GetName(), err)
+			cmd.log.Infof("list workspaces in project %q: %v", p.GetName(), err)
 			continue
 		}
 

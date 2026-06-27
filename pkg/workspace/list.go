@@ -16,10 +16,10 @@ import (
 	"github.com/loft-sh/devpod/pkg/client/clientimplementation"
 	"github.com/loft-sh/devpod/pkg/config"
 	daemon "github.com/loft-sh/devpod/pkg/daemon/platform"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform"
 	providerpkg "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log"
 	"github.com/sirupsen/logrus"
 )
 
@@ -222,7 +222,7 @@ func listProWorkspacesForProvider(ctx context.Context, devPodConfig *config.Conf
 			rawSource := instance.Annotations[storagev1.DevPodWorkspaceSourceAnnotation]
 			s := providerpkg.ParseWorkspaceSource(rawSource)
 			if s == nil {
-				log.ErrorStreamOnly().Warnf("unable to parse workspace source \"%s\": %v", rawSource)
+				log.ErrorStreamOnly().Warnf("unable to parse workspace source %q", rawSource)
 			} else {
 				source = *s
 			}

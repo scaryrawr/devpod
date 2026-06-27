@@ -14,7 +14,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/single"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	perrors "github.com/pkg/errors"
 	"github.com/takama/daemon"
 )

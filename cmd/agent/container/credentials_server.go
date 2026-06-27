@@ -18,7 +18,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/gitsshsigning"
 	"github.com/loft-sh/devpod/pkg/netstat"
 	portpkg "github.com/loft-sh/devpod/pkg/port"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/spf13/cobra"
 )
 

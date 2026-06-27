@@ -10,7 +10,7 @@ import (
 	client2 "github.com/loft-sh/devpod/pkg/client"
 	"github.com/loft-sh/devpod/pkg/config"
 	workspace2 "github.com/loft-sh/devpod/pkg/workspace"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/spf13/cobra"
 )
 

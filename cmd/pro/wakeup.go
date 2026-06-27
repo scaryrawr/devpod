@@ -10,9 +10,9 @@ import (
 	storagev1 "github.com/loft-sh/api/v4/pkg/apis/storage/v1"
 	"github.com/loft-sh/devpod/cmd/pro/flags"
 	"github.com/loft-sh/devpod/pkg/config"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform"
 	"github.com/loft-sh/devpod/pkg/platform/project"
-	"github.com/loft-sh/log"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -74,7 +74,7 @@ func (cmd *WakeupCmd) Run(ctx context.Context, args []string) error {
 	}
 
 	if workspaceInstance.Status.Phase != storagev1.InstanceSleeping {
-		cmd.Log.Infof("Workspace %s is not sleeping", targetWorkspace, workspaceInstance.Name)
+		cmd.Log.Infof("Workspace %s is not sleeping", targetWorkspace)
 		return nil
 	}
 

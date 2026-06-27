@@ -16,7 +16,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/types"
 	versionpkg "github.com/loft-sh/devpod/pkg/version"
 	"github.com/loft-sh/devpod/pkg/workspace"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/mgutz/ansi"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"

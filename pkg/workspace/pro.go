@@ -5,7 +5,7 @@ import (
 
 	"github.com/loft-sh/devpod/pkg/config"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 )
 
 func ListProInstances(devPodConfig *config.Config, log log.Logger) ([]*provider2.ProInstance, error) {

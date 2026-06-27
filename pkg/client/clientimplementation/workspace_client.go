@@ -24,7 +24,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/shell"
 	"github.com/loft-sh/devpod/pkg/ssh"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	perrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )

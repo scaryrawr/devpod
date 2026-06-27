@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 
 	"github.com/loft-sh/devpod/cmd/flags"
+	"github.com/loft-sh/devpod/pkg/log"
 	helperssh "github.com/loft-sh/devpod/pkg/ssh/server"
 	"github.com/loft-sh/devpod/pkg/ssh/server/port"
-	"github.com/loft-sh/log"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -57,7 +57,7 @@ func (cmd *SSHServerCmd) Run(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("address %s already in use: %w", cmd.Address, err)
 		}
 
-		log.Default.ErrorStreamOnly().Info("address %s already in use", cmd.Address)
+		log.Default.ErrorStreamOnly().Infof("address %s already in use", cmd.Address)
 		return nil
 	}
 

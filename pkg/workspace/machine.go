@@ -13,9 +13,9 @@ import (
 	"github.com/loft-sh/devpod/pkg/file"
 	providerpkg "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log"
-	"github.com/loft-sh/log/survey"
-	"github.com/loft-sh/log/terminal"
+	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/log/survey"
+	"github.com/loft-sh/devpod/pkg/log/terminal"
 )
 
 func listMachines(devPodConfig *config.Config, log log.Logger) ([]*providerpkg.Machine, error) {

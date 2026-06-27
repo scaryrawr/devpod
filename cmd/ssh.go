@@ -19,12 +19,12 @@ import (
 	"github.com/loft-sh/devpod/pkg/config"
 	daemon "github.com/loft-sh/devpod/pkg/daemon/platform"
 	"github.com/loft-sh/devpod/pkg/gpg"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/port"
 	"github.com/loft-sh/devpod/pkg/provider"
 	devssh "github.com/loft-sh/devpod/pkg/ssh"
 	"github.com/loft-sh/devpod/pkg/tunnel"
 	workspace2 "github.com/loft-sh/devpod/pkg/workspace"
-	"github.com/loft-sh/log"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -659,7 +659,7 @@ func startSSHKeepAlive(ctx context.Context, client *ssh.Client, interval time.Du
 		case <-ticker.C:
 			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
 			if err != nil {
-				log.Errorf("Failed to send keepalive: %w", err)
+				log.Errorf("Failed to send keepalive: %v", err)
 			}
 		}
 	}

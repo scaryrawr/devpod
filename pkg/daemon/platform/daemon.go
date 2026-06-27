@@ -12,10 +12,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/loft-sh/devpod/pkg/log"
 	devpodlog "github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform/client"
 	"github.com/loft-sh/devpod/pkg/ts"
-	"github.com/loft-sh/log"
 	"github.com/sirupsen/logrus"
 	"tailscale.com/client/tailscale"
 	"tailscale.com/tsnet"
@@ -143,7 +143,7 @@ func (d *Daemon) handler(conn net.Conn, dialFunc dialFunc) {
 	defer cancel()
 	backendConn, err := dialFunc(ctx)
 	if err != nil {
-		d.log.Error("dial: %v", err)
+		d.log.Errorf("dial: %v", err)
 		return
 	}
 	defer backendConn.Close()

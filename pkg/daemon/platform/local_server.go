@@ -15,11 +15,11 @@ import (
 	managementv1 "github.com/loft-sh/api/v4/pkg/apis/management/v1"
 	"github.com/loft-sh/devpod/pkg/dockercredentials"
 	"github.com/loft-sh/devpod/pkg/gitcredentials"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform"
 	platformclient "github.com/loft-sh/devpod/pkg/platform/client"
 	"github.com/loft-sh/devpod/pkg/platform/labels"
 	"github.com/loft-sh/devpod/pkg/platform/project"
-	"github.com/loft-sh/log"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
@@ -496,7 +496,7 @@ func (l *localServer) watchWorkspaces(w http.ResponseWriter, r *http.Request, pa
 	)
 	if err != nil {
 		http.Error(w, fmt.Errorf("failed to watch workspaces: %w", err).Error(), http.StatusInternalServerError)
-		l.log.Errorf("watch workspaces: %w", err)
+		l.log.Errorf("watch workspaces: %v", err)
 		return
 	}
 }

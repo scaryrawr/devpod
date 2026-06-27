@@ -10,7 +10,7 @@ import (
 	copypkg "github.com/loft-sh/devpod/pkg/copy"
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
 	shellpkg "github.com/loft-sh/devpod/pkg/shell"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/ssh"
 )
 

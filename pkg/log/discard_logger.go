@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
-	"github.com/loft-sh/log/survey"
+	"github.com/loft-sh/devpod/pkg/log/survey"
 	"github.com/sirupsen/logrus"
 )
 

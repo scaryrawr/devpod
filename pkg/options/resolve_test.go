@@ -12,7 +12,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/options/resolver"
 	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"gotest.tools/assert"
 )
 

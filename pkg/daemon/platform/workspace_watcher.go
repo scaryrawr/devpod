@@ -18,7 +18,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/platform/project"
 	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/ts"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"

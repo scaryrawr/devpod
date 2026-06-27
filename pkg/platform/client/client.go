@@ -26,7 +26,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/platform/project"
 	"github.com/loft-sh/devpod/pkg/util"
 	"github.com/loft-sh/devpod/pkg/version"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	perrors "github.com/pkg/errors"
 	"github.com/skratchdot/open-golang/open"
 	"k8s.io/client-go/rest"

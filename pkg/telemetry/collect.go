@@ -11,7 +11,7 @@ import (
 	devpodclient "github.com/loft-sh/devpod/pkg/client"
 	"github.com/loft-sh/devpod/pkg/config"
 	"github.com/loft-sh/devpod/pkg/version"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/moby/term"
 	"github.com/spf13/cobra"
 )

@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	versionpkg "github.com/loft-sh/devpod/pkg/version"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/pkg/errors"
 
 	"github.com/blang/semver"

@@ -43,7 +43,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/util"
 	"github.com/loft-sh/devpod/pkg/version"
 	workspace2 "github.com/loft-sh/devpod/pkg/workspace"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/skratchdot/open-golang/open"

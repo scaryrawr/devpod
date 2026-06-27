@@ -20,7 +20,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/driver"
 	"github.com/loft-sh/devpod/pkg/ide/jetbrains"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )

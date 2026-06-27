@@ -9,8 +9,8 @@ import (
 
 	"github.com/loft-sh/devpod/pkg/command"
 	"github.com/loft-sh/devpod/pkg/file"
-	"github.com/loft-sh/log"
-	"github.com/loft-sh/log/scanner"
+	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/log/scanner"
 	"github.com/pkg/errors"
 )
 
@@ -53,7 +53,7 @@ func ConfigureHelper(userName, gitSigningKey string, log log.Logger) error {
 	}
 	log.Debugf("Got config path: %v", gitConfigPath)
 	if err := updateGitConfig(gitConfigPath, userName, gitSigningKey); err != nil {
-		log.Errorf("Failed updating git configuration: %w", err)
+		log.Errorf("Failed updating git configuration: %v", err)
 		return err
 	}
 

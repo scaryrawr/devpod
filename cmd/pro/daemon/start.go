@@ -17,7 +17,7 @@ import (
 	proflags "github.com/loft-sh/devpod/cmd/pro/flags"
 	"github.com/loft-sh/devpod/pkg/config"
 	providerpkg "github.com/loft-sh/devpod/pkg/provider"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/spf13/cobra"
 )
 

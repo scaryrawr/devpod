@@ -16,8 +16,8 @@ import (
 	"github.com/loft-sh/devpod/pkg/driver"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log"
-	"github.com/loft-sh/log/scanner"
+	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/log/scanner"
 	"github.com/sirupsen/logrus"
 )
 

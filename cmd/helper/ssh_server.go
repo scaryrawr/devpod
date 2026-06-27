@@ -12,7 +12,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/ssh/server/port"
 	"github.com/loft-sh/devpod/pkg/stdio"
 	"github.com/loft-sh/devpod/pkg/token"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/ssh"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"

@@ -9,7 +9,7 @@ import (
 
 	"github.com/loft-sh/devpod/pkg/credentials"
 	devpodhttp "github.com/loft-sh/devpod/pkg/http"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 )
 
 // HandleGitSSHProgramCall implements logic handling call from git when signing a commit
@@ -55,7 +55,7 @@ func requestContentSignature(content []byte, certPath string, log log.Logger) ([
 func writeSignatureToFile(signature []byte, bufferFile string, log log.Logger) error {
 	sigFile := bufferFile + ".sig"
 	if err := os.WriteFile(sigFile, signature, 0644); err != nil {
-		log.Errorf("Failed to write signature to file: %w", err)
+		log.Errorf("Failed to write signature to file: %v", err)
 		return err
 	}
 	return nil
@@ -81,7 +81,7 @@ func sendSignatureRequest(requestBody []byte, log log.Logger) ([]byte, error) {
 		bytes.NewReader(requestBody),
 	)
 	if err != nil {
-		log.Errorf("Error retrieving git ssh signature: %w", err)
+		log.Errorf("Error retrieving git ssh signature: %v", err)
 		return nil, err
 	}
 	defer response.Body.Close()
@@ -92,7 +92,7 @@ func sendSignatureRequest(requestBody []byte, log log.Logger) ([]byte, error) {
 func parseSignatureResponse(responseBody []byte, log log.Logger) ([]byte, error) {
 	signatureResponse := &GitSSHSignatureResponse{}
 	if err := json.Unmarshal(responseBody, signatureResponse); err != nil {
-		log.Errorf("Error decoding git ssh signature: %w", err)
+		log.Errorf("Error decoding git ssh signature: %v", err)
 		return nil, err
 	}
 

@@ -8,7 +8,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/driver/docker"
 	"github.com/loft-sh/devpod/pkg/driver/kubernetes"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 )
 
 func NewDriver(workspaceInfo *provider2.AgentWorkspaceInfo, log log.Logger) (driver.Driver, error) {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"tailscale.com/client/tailscale"
 	"tailscale.com/ipn"
 	"tailscale.com/types/netmap"

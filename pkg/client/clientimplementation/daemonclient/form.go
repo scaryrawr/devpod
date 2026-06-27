@@ -17,7 +17,7 @@ import (
 	platformclient "github.com/loft-sh/devpod/pkg/platform/client"
 	"github.com/loft-sh/devpod/pkg/platform/labels"
 	"github.com/loft-sh/devpod/pkg/platform/project"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

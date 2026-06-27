@@ -14,8 +14,8 @@ import (
 	"sync"
 
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/log"
 	"github.com/sirupsen/logrus"
 )
 
@@ -24,7 +24,7 @@ func RunLifecycleHooks(ctx context.Context, setupInfo *config.Result, log log.Lo
 	remoteUser := config.GetRemoteUser(setupInfo)
 	probedEnv, err := config.ProbeUserEnv(ctx, mergedConfig.UserEnvProbe, remoteUser, log)
 	if err != nil {
-		log.Errorf("failed to probe environment, this might lead to an incomplete setup of your workspace: %w", err)
+		log.Errorf("failed to probe environment, this might lead to an incomplete setup of your workspace: %v", err)
 	}
 	remoteEnv := mergeRemoteEnv(mergedConfig.RemoteEnv, probedEnv, remoteUser)
 

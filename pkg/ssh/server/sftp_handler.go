@@ -5,7 +5,7 @@ import (
 	"io"
 
 	"github.com/loft-sh/devpod/pkg/command"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/ssh"
 	"github.com/pkg/sftp"
 	"github.com/sirupsen/logrus"

@@ -21,7 +21,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/gitcredentials"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/util"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/moby/patternmatcher/ignorefile"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

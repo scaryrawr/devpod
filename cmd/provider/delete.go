@@ -11,7 +11,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/platform"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/workspace"
-	logpkg "github.com/loft-sh/log"
+	logpkg "github.com/loft-sh/devpod/pkg/log"
 	"github.com/spf13/cobra"
 )
 

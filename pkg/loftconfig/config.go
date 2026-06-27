@@ -4,15 +4,15 @@ import (
 	"fmt"
 	"os/exec"
 
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/platform/client"
-	"github.com/loft-sh/log"
 )
 
 func AuthDevpodCliToPlatform(config *client.Config, logger log.Logger) error {
 	cmd := exec.Command("devpod", "pro", "login", "--access-key", config.AccessKey, config.Host)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Debugf("Failed executing `devpod pro login`: %w, output: %s", err, out)
+		logger.Debugf("Failed executing `devpod pro login`: %v, output: %s", err, out)
 		return fmt.Errorf("error executing 'devpod pro login' command: %w, access key: %v, host: %v", err, config.AccessKey, config.Host)
 	}
 
@@ -29,7 +29,7 @@ func AuthVClusterCliToPlatform(config *client.Config, logger log.Logger) error {
 	cmd := exec.Command("vcluster", "login", "--access-key", config.AccessKey, config.Host)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Debugf("Failed executing `vcluster login` : %w, output: %s", err, out)
+		logger.Debugf("Failed executing `vcluster login` : %v, output: %s", err, out)
 		return fmt.Errorf("error executing 'vcluster login' command: %w", err)
 	}
 

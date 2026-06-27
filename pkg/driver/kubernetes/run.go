@@ -104,7 +104,7 @@ func (k *KubernetesDriver) runContainer(
 		// Ensure workspace volume mount option is parent or same dir as workspace mount
 		rel, err := filepath.Rel(k.options.WorkspaceVolumeMount, mount.Target)
 		if err != nil {
-			k.Log.Warn("Relative filepath: %v", err)
+			k.Log.Warnf("Relative filepath: %v", err)
 		} else if strings.HasPrefix(rel, "..") {
 			k.Log.Warnf("Workspace volume mount needs to be the same as the workspace mount or a parent, skipping option. WorkspaceVolumeMount: %s, MountTarget: %s", k.options.WorkspaceVolumeMount, mount.Target)
 		} else {

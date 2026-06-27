@@ -24,7 +24,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/devcontainer/feature"
 	"github.com/loft-sh/devpod/pkg/image"
 	"github.com/loft-sh/devpod/pkg/provider"
-	"github.com/loft-sh/log"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/session"
