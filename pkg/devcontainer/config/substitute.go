@@ -173,18 +173,24 @@ func substitute0(val interface{}, replace ReplaceFunction) interface{} {
 
 func ResolveString(val string, replace ReplaceFunction) string {
 	return string(VariableRegExp.ReplaceAllFunc([]byte(val), func(match []byte) []byte {
-		variable := string(match[2 : len(match)-1])
-
-		// try to separate variable arguments from variable name
-		args := []string{}
-		parts := strings.Split(variable, ":")
-		if len(parts) > 1 {
-			variable = parts[0]
-			args = parts[1:]
-		}
+		variable, args := parseVariable(string(match[2 : len(match)-1]))
 
 		return []byte(replace(string(match), variable, args))
 	}))
+}
+
+func parseVariable(variable string) (string, []string) {
+	name, rest, ok := strings.Cut(variable, ":")
+	if !ok {
+		return variable, nil
+	}
+
+	arg, defaultValue, hasDefault := strings.Cut(rest, ":")
+	args := []string{arg}
+	if hasDefault {
+		args = append(args, defaultValue)
+	}
+	return name, args
 }
 
 func ObjectToList(object map[string]string) []string {

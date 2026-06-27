@@ -89,72 +89,104 @@ func run(commands []types.LifecycleHook, remoteUser, dir string, remoteEnv map[s
 		remoteEnvArr = append(remoteEnvArr, k+"="+v)
 	}
 
-	for _, cmd := range commands {
-		if len(cmd) == 0 {
+	currentUser, err := user.Current()
+	if err != nil {
+		return err
+	}
+	for _, hook := range commands {
+		if len(hook) == 0 {
 			continue
 		}
-
-		for k, c := range cmd {
-			log.Infof("Run command %s: %s...", k, strings.Join(c, " "))
-			currentUser, err := user.Current()
-			if err != nil {
-				return err
-			}
-			args := getLifecycleHookCommandArgs(c)
-
-			// create command
-			cmd := exec.Command(args[0], args[1:]...)
-			cmd.Dir = dir
-			cmd.Env = os.Environ()
-			cmd.Env = append(cmd.Env, remoteEnvArr...)
-			if remoteUser != currentUser.Username {
-				err := config.PrepareCmdUser(cmd, remoteUser)
-				if err != nil {
-					return fmt.Errorf("prepare command user %s: %w", remoteUser, err)
-				}
-			}
-
-			// Create pipes for stdout and stderr
-			stdoutPipe, err := cmd.StdoutPipe()
-			if err != nil {
-				return fmt.Errorf("failed to get stdout pipe: %w", err)
-			}
-			stderrPipe, err := cmd.StderrPipe()
-			if err != nil {
-				return fmt.Errorf("failed to get stderr pipe: %w", err)
-			}
-
-			// Start the command
-			if err := cmd.Start(); err != nil {
-				return fmt.Errorf("failed to start command: %w", err)
-			}
-
-			// Use WaitGroup to wait for both stdout and stderr processing
-			var wg sync.WaitGroup
-			wg.Add(2)
-
-			go func() {
-				defer wg.Done()
-				logPipeOutput(log, stdoutPipe, logrus.InfoLevel)
-			}()
-
-			go func() {
-				defer wg.Done()
-				logPipeOutput(log, stderrPipe, logrus.ErrorLevel)
-			}()
-
-			// Wait for command to finish
-			wg.Wait()
-			err = cmd.Wait()
-			if err != nil {
-				log.Debugf("Failed running %s lifecycle script %s: %v", name, cmd.Args, err)
-				return fmt.Errorf("failed to run: %s, error: %w", strings.Join(c, " "), err)
-			}
-
-			log.Donef("Successfully ran command %s: %s", k, strings.Join(c, " "))
+		if err := runLifecycleHook(hook, currentUser.Username, remoteUser, dir, remoteEnvArr, name, log); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+func runLifecycleHook(hook types.LifecycleHook, currentUser, remoteUser, dir string, remoteEnvArr []string, name string, log log.Logger) error {
+	if len(hook) == 1 {
+		for key, command := range hook {
+			return runLifecycleCommand(key, command, currentUser, remoteUser, dir, remoteEnvArr, name, log)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(hook))
+	for key, command := range hook {
+		key := key
+		command := command
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runLifecycleCommand(key, command, currentUser, remoteUser, dir, remoteEnvArr, name, log); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		return err
+	}
+	return nil
+}
+
+func runLifecycleCommand(key string, command []string, currentUser, remoteUser, dir string, remoteEnvArr []string, name string, log log.Logger) error {
+	if len(command) == 0 {
+		return nil
+	}
+
+	log.Infof("Run command %s: %s...", key, strings.Join(command, " "))
+	args := getLifecycleHookCommandArgs(command)
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, remoteEnvArr...)
+	if remoteUser != currentUser {
+		err := config.PrepareCmdUser(cmd, remoteUser)
+		if err != nil {
+			return fmt.Errorf("prepare command user %s: %w", remoteUser, err)
+		}
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start command: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		logPipeOutput(log, stdoutPipe, logrus.InfoLevel)
+	}()
+
+	go func() {
+		defer wg.Done()
+		logPipeOutput(log, stderrPipe, logrus.ErrorLevel)
+	}()
+
+	wg.Wait()
+	err = cmd.Wait()
+	if err != nil {
+		log.Debugf("Failed running %s lifecycle script %s: %v", name, cmd.Args, err)
+		return fmt.Errorf("failed to run: %s, error: %w", strings.Join(command, " "), err)
+	}
+
+	log.Donef("Successfully ran command %s: %s", key, strings.Join(command, " "))
 	return nil
 }
 

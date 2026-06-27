@@ -219,7 +219,9 @@ func findContainerUsers(baseImageMetadata *config.ImageMetadataConfig, composeSe
 		}
 	}
 	if remoteUser == "" {
-		if composeServiceUser != "" {
+		if containerUser != "" {
+			remoteUser = containerUser
+		} else if composeServiceUser != "" {
 			remoteUser = composeServiceUser
 		} else if imageUser != "" {
 			remoteUser = imageUser

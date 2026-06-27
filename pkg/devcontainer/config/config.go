@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -43,7 +45,21 @@ func CloneDevContainerConfig(config *DevContainerConfig) *DevContainerConfig {
 	return out
 }
 
+func (c *DevContainerConfig) UnmarshalJSON(data []byte) error {
+	type devContainerConfig DevContainerConfig
+	var raw devContainerConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*c = DevContainerConfig(raw)
+	return applyLegacyPortsAttributes(data, &c.DevContainerConfigBase)
+}
+
 type DevContainerConfigBase struct {
+	// Schema identifies the JSON schema used to validate this devcontainer.json.
+	Schema string `json:"$schema,omitempty"`
+
 	// A name for the dev container which can be displayed to the user.
 	Name string `json:"name,omitempty"`
 
@@ -53,11 +69,14 @@ type DevContainerConfigBase struct {
 	// Array consisting of the Feature id (without the semantic version) of Features in the order the user wants them to be installed.
 	OverrideFeatureInstallOrder []string `json:"overrideFeatureInstallOrder,omitempty"`
 
+	// Secrets recommends environment variables needed by the dev container.
+	Secrets map[string]Secret `json:"secrets,omitempty"`
+
 	// Ports that are forwarded from the container to the local machine. Can be an integer port number, or a string of the format "host:port_number".
 	ForwardPorts types.StrIntArray `json:"forwardPorts,omitempty"`
 
 	// Set default properties that are applied when a specific port number is forwarded.
-	PortsAttributes map[string]PortAttribute `json:"portAttributes,omitempty"`
+	PortsAttributes map[string]PortAttribute `json:"portsAttributes,omitempty"`
 
 	// Set default properties that are applied to all ports that don't get properties from the setting `remote.portsAttributes`.
 	OtherPortsAttributes *PortAttribute `json:"otherPortsAttributes,omitempty"`
@@ -103,6 +122,20 @@ type DevContainerConfigBase struct {
 	// DEPRECATED: Use 'customizations/vscode/devPort' instead
 	// The port VS Code can use to connect to its backend.
 	DevPort int `json:"devPort,omitempty"`
+}
+
+func applyLegacyPortsAttributes(data []byte, base *DevContainerConfigBase) error {
+	var raw struct {
+		LegacyPortsAttributes map[string]PortAttribute `json:"portAttributes,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	if base.PortsAttributes == nil && raw.LegacyPortsAttributes != nil {
+		base.PortsAttributes = raw.LegacyPortsAttributes
+	}
+	return nil
 }
 
 type DevContainerActions struct {
@@ -301,8 +334,100 @@ type HostRequirements struct {
 	// Amount of required disk space in bytes. Supports units tb, gb, mb and kb.
 	Storage string `json:"storage,omitempty"`
 
-	// If GPU support should be enabled
-	GPU types.StrBool `json:"gpu,omitempty"`
+	// GPU describes whether GPU support is required, optional, or constrained by resource requirements.
+	GPU *HostGPURequirements `json:"gpu,omitempty"`
+}
+
+// Secret describes a recommended environment variable for a dev container.
+type Secret struct {
+	// Description explains what the secret is used for.
+	Description string `json:"description,omitempty"`
+
+	// DocumentationURL points users to instructions for creating or finding the secret.
+	DocumentationURL string `json:"documentationUrl,omitempty"`
+}
+
+// HostGPURequirements represents hostRequirements.gpu boolean, "optional", or object values.
+type HostGPURequirements struct {
+	Requirement string
+	Cores       int
+	Memory      string
+}
+
+// UnmarshalJSON accepts the dev container spec's boolean, string, and object GPU forms.
+func (g *HostGPURequirements) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	switch {
+	case bytes.Equal(data, []byte("true")):
+		g.Requirement = "true"
+		return nil
+	case bytes.Equal(data, []byte("false")):
+		g.Requirement = "false"
+		return nil
+	case len(data) > 0 && data[0] == '"':
+		return json.Unmarshal(data, &g.Requirement)
+	case len(data) > 0 && data[0] == '{':
+		var gpuRequirements struct {
+			Cores  int    `json:"cores,omitempty"`
+			Memory string `json:"memory,omitempty"`
+		}
+		if err := json.Unmarshal(data, &gpuRequirements); err != nil {
+			return err
+		}
+		g.Requirement = "true"
+		g.Cores = gpuRequirements.Cores
+		g.Memory = gpuRequirements.Memory
+		return nil
+	default:
+		return types.ErrUnsupportedType
+	}
+}
+
+// MarshalJSON preserves object GPU constraints and emits scalar requirements in their schema form.
+func (g HostGPURequirements) MarshalJSON() ([]byte, error) {
+	if g.Cores != 0 || g.Memory != "" {
+		return json.Marshal(struct {
+			Cores  int    `json:"cores,omitempty"`
+			Memory string `json:"memory,omitempty"`
+		}{
+			Cores:  g.Cores,
+			Memory: g.Memory,
+		})
+	}
+	switch strings.ToLower(g.Requirement) {
+	case "", "false":
+		return []byte("false"), nil
+	case "true":
+		return []byte("true"), nil
+	case "optional":
+		return json.Marshal(g.Requirement)
+	default:
+		return nil, fmt.Errorf("unsupported gpu requirement %q", g.Requirement)
+	}
+}
+
+// Bool converts required or optional GPU settings to whether DevPod should request GPU access.
+func (g *HostGPURequirements) Bool() (bool, error) {
+	if g == nil {
+		return false, nil
+	}
+	switch strings.ToLower(g.Requirement) {
+	case "", "false":
+		return false, nil
+	case "true", "optional":
+		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported gpu requirement %q", g.Requirement)
+	}
+}
+
+// UsesGPU reports whether host requirements ask DevPod to request GPU access.
+func (h *HostRequirements) UsesGPU() bool {
+	if h == nil {
+		return false
+	}
+	usesGPU, err := h.GPU.Bool()
+	return err == nil && usesGPU
 }
 
 type PortAttribute struct {
@@ -379,16 +504,23 @@ func ParseMount(str string) Mount {
 	retMount := Mount{}
 	splitted := strings.Split(str, ",")
 	for _, split := range splitted {
-		splitted2 := strings.Split(split, "=")
-		key := splitted2[0]
+		key, value, hasValue := strings.Cut(split, "=")
 		if key == "src" || key == "source" {
-			retMount.Source = splitted2[1]
+			if hasValue {
+				retMount.Source = value
+			}
 		} else if key == "dst" || key == "destination" || key == "target" {
-			retMount.Target = splitted2[1]
+			if hasValue {
+				retMount.Target = value
+			}
 		} else if key == "type" {
-			retMount.Type = splitted2[1]
+			if hasValue {
+				retMount.Type = value
+			}
 		} else if key == "external" {
-			retMount.External, _ = strconv.ParseBool(splitted2[1])
+			if hasValue {
+				retMount.External, _ = strconv.ParseBool(value)
+			}
 		} else {
 			retMount.Other = append(retMount.Other, split)
 		}

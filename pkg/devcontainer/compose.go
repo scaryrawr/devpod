@@ -749,7 +749,7 @@ exec "$$@"
 	}
 
 	gpuSupportEnabled, _ := composeHelper.Docker.GPUSupportEnabled()
-	if parsedConfig.Config.HostRequirements != nil && parsedConfig.Config.HostRequirements.GPU == "true" && gpuSupportEnabled {
+	if parsedConfig.Config.HostRequirements.UsesGPU() && gpuSupportEnabled {
 		overrideService.Deploy = &composetypes.DeployConfig{
 			Resources: composetypes.Resources{
 				Reservations: &composetypes.Resource{

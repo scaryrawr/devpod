@@ -19,8 +19,8 @@ import (
 	"github.com/loft-sh/devpod/pkg/docker"
 	"github.com/loft-sh/devpod/pkg/driver"
 	"github.com/loft-sh/devpod/pkg/ide/jetbrains"
-	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/log"
+	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -254,6 +254,7 @@ func (d *dockerDriver) RunDockerDevContainer(
 	if !helper.IsNerdctl() {
 		args = append(args, "--sig-proxy=false")
 	}
+	args = appendInitArg(args, init)
 
 	// add ports
 	for _, appPort := range parsedConfig.AppPort {
@@ -342,25 +343,14 @@ func (d *dockerDriver) RunDockerDevContainer(
 	}
 
 	// check GPU
-	if parsedConfig.HostRequirements != nil && parsedConfig.HostRequirements.GPU == "true" {
+	if parsedConfig.HostRequirements.UsesGPU() {
 		enabled, _ := d.Docker.GPUSupportEnabled()
-		if enabled {
+		if enabled && !slices.Contains(parsedConfig.RunArgs, "--gpus") && !slices.Contains(parsedConfig.RunArgs, "--gpus=all") {
 			args = append(args, "--gpus", "all")
 		}
 	}
 
 	// runArgs
-	// check if we need to add --gpus=all to the run args based on the dev container's host requirments
-	if parsedConfig.HostRequirements != nil {
-		usesGpu, err := parsedConfig.HostRequirements.GPU.Bool()
-		if err != nil && usesGpu {
-			// check if the user manually add --gpus=all, if not then add it
-			if !slices.Contains(parsedConfig.RunArgs, "--gpus=all") {
-				args = append(args, "--gpus=all")
-			}
-		}
-	}
-
 	args = append(args, parsedConfig.RunArgs...)
 
 	// run detached
@@ -565,6 +555,13 @@ func (d *dockerDriver) RunDockerDevContainer(
 	}
 
 	return nil
+}
+
+func appendInitArg(args []string, init *bool) []string {
+	if init != nil && *init {
+		args = append(args, "--init")
+	}
+	return args
 }
 
 func (d *dockerDriver) EnsureImage(

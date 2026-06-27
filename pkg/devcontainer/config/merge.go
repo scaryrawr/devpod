@@ -6,6 +6,12 @@ import (
 	"github.com/loft-sh/devpod/pkg/types"
 )
 
+const (
+	defaultWaitFor                  = "updateContentCommand"
+	defaultShutdownActionContainer  = "stopContainer"
+	defaultShutdownActionDockerComp = "stopCompose"
+)
+
 func MergeConfiguration(config *DevContainerConfig, imageMetadataEntries []*ImageMetadata) (*MergedDevContainerConfig, error) {
 	customizations := map[string][]interface{}{}
 	for _, imageMetadata := range imageMetadataEntries {
@@ -43,21 +49,46 @@ func MergeConfiguration(config *DevContainerConfig, imageMetadataEntries []*Imag
 	mergedConfig.PostCreateCommands = mergeLifestyleHooks(reversed, func(entry *ImageMetadata) types.LifecycleHook { return entry.PostCreateCommand })
 	mergedConfig.PostStartCommands = mergeLifestyleHooks(reversed, func(entry *ImageMetadata) types.LifecycleHook { return entry.PostStartCommand })
 	mergedConfig.PostAttachCommands = mergeLifestyleHooks(reversed, func(entry *ImageMetadata) types.LifecycleHook { return entry.PostAttachCommand })
-	mergedConfig.WaitFor = firstString(reversed, func(entry *ImageMetadata) string { return entry.WaitFor })
-	mergedConfig.RemoteUser = firstString(reversed, func(entry *ImageMetadata) string { return entry.RemoteUser })
-	mergedConfig.ContainerUser = firstString(reversed, func(entry *ImageMetadata) string { return entry.ContainerUser })
+	if waitFor := firstString(reversed, func(entry *ImageMetadata) string { return entry.WaitFor }); waitFor != "" {
+		mergedConfig.WaitFor = waitFor
+	}
+	if remoteUser := firstString(reversed, func(entry *ImageMetadata) string { return entry.RemoteUser }); remoteUser != "" {
+		mergedConfig.RemoteUser = remoteUser
+	}
+	if containerUser := firstString(reversed, func(entry *ImageMetadata) string { return entry.ContainerUser }); containerUser != "" {
+		mergedConfig.ContainerUser = containerUser
+	}
+	if mergedConfig.RemoteUser == "" {
+		mergedConfig.RemoteUser = mergedConfig.ContainerUser
+	}
 	mergedConfig.UserEnvProbe = firstString(reversed, func(entry *ImageMetadata) string { return entry.UserEnvProbe })
 	mergedConfig.RemoteEnv = mergeMaps(reversed, func(entry *ImageMetadata) map[string]string { return entry.RemoteEnv })
 	mergedConfig.ContainerEnv = mergeMaps(reversed, func(entry *ImageMetadata) map[string]string { return entry.ContainerEnv })
 	mergedConfig.PortsAttributes = mergeMaps(reversed, func(entry *ImageMetadata) map[string]PortAttribute { return entry.PortsAttributes })
 	mergedConfig.OverrideCommand = some(reversed, func(entry *ImageMetadata) *bool { return entry.OverrideCommand })
 	mergedConfig.OtherPortsAttributes = mergeOtherPortsAttributes(reversed)
-	mergedConfig.ShutdownAction = firstString(reversed, func(entry *ImageMetadata) string { return entry.ShutdownAction })
+	if shutdownAction := firstString(reversed, func(entry *ImageMetadata) string { return entry.ShutdownAction }); shutdownAction != "" {
+		mergedConfig.ShutdownAction = shutdownAction
+	}
 	mergedConfig.ForwardPorts = mergeForwardPorts(reversed)
 	mergedConfig.UpdateRemoteUserUID = some(reversed, func(entry *ImageMetadata) *bool { return entry.UpdateRemoteUserUID })
 	mergedConfig.HostRequirements = mergeHostRequirements(reversed)
+	applySpecDefaults(mergedConfig)
 
 	return mergedConfig, nil
+}
+
+func applySpecDefaults(mergedConfig *MergedDevContainerConfig) {
+	if mergedConfig.WaitFor == "" {
+		mergedConfig.WaitFor = defaultWaitFor
+	}
+	if mergedConfig.ShutdownAction == "" {
+		if len(mergedConfig.DockerComposeFile) > 0 {
+			mergedConfig.ShutdownAction = defaultShutdownActionDockerComp
+		} else {
+			mergedConfig.ShutdownAction = defaultShutdownActionContainer
+		}
+	}
 }
 
 func mergeOtherPortsAttributes(entries []*ImageMetadata) *PortAttribute {

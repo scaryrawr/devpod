@@ -82,3 +82,14 @@ func TestLifecycleHookUnmarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestLifecycleHookUnmarshalJSONRejectsNonStringArrayValues(t *testing.T) {
+	var data struct {
+		Input types.LifecycleHook `json:"input,omitempty"`
+	}
+
+	err := json.Unmarshal([]byte(`{"input": {"bad": ["ok", 1]}}`), &data)
+	if err == nil {
+		t.Fatalf("expected unsupported type error")
+	}
+}

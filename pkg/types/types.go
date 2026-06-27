@@ -125,7 +125,11 @@ func (l *LifecycleHook) UnmarshalJSON(data []byte) error {
 
 				cmd := make([]string, 0)
 				for _, v := range stringArrayValue {
-					cmd = append(cmd, v.(string))
+					value, ok := v.(string)
+					if !ok {
+						return ErrUnsupportedType
+					}
+					cmd = append(cmd, value)
 				}
 				(*l)[k] = cmd
 			}

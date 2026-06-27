@@ -34,6 +34,8 @@ func GetRemoteUser(result *Result) string {
 	if result != nil {
 		if result.MergedConfig != nil && result.MergedConfig.RemoteUser != "" {
 			user = result.MergedConfig.RemoteUser
+		} else if result.MergedConfig != nil && result.MergedConfig.ContainerUser != "" {
+			user = result.MergedConfig.ContainerUser
 		} else if result.ContainerDetails != nil && result.ContainerDetails.Config.Labels != nil && result.ContainerDetails.Config.Labels[UserLabel] != "" {
 			user = result.ContainerDetails.Config.Labels[UserLabel]
 		}

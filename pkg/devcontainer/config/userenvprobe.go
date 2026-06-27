@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loft-sh/devpod/pkg/shell"
 	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/shell"
 )
 
 type UserEnvProbe string
@@ -103,23 +103,32 @@ func doProbe(ctx context.Context, userEnvProbe UserEnvProbe, preferredShell []st
 		return nil, fmt.Errorf("probe user env: %w", err)
 	}
 
+	retEnv, err := parseUserEnvOutput(out, sep, log)
+	if err != nil {
+		return nil, err
+	}
+	delete(retEnv, "PWD")
+
+	return retEnv, nil
+}
+
+func parseUserEnvOutput(out []byte, sep byte, log log.Logger) (map[string]string, error) {
 	scanner := bufio.NewScanner(bytes.NewBuffer(out))
 	scanner.Split(splitBySeparator(sep))
 
 	retEnv := map[string]string{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		tokens := strings.Split(line, "=")
-		if len(tokens) == 1 {
+		key, value, found := strings.Cut(line, "=")
+		if !found {
 			log.Debugf("failed to split env var: %s", line)
 			continue
 		}
-		retEnv[tokens[0]] = tokens[1]
+		retEnv[key] = value
 	}
-	if scanner.Err() != nil {
+	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scan shell output: %w", err)
 	}
-	delete(retEnv, "PWD")
 
 	return retEnv, nil
 }

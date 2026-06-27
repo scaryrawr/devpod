@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
@@ -15,8 +16,9 @@ import (
 	"github.com/loft-sh/devpod/pkg/driver/drivercreate"
 	"github.com/loft-sh/devpod/pkg/encoding"
 	"github.com/loft-sh/devpod/pkg/language"
-	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/log"
+	provider2 "github.com/loft-sh/devpod/pkg/provider"
+	"github.com/loft-sh/devpod/pkg/types"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -199,37 +201,79 @@ func runInitializeCommand(
 		}
 	}
 
-	for _, cmd := range config.InitializeCommand {
-		// should run in shell?
-		var args []string
-		if len(cmd) == 1 {
-			args = []string{shellArgs[0], shellArgs[1], cmd[0]}
-		} else {
-			args = cmd
-		}
-
-		// run the command
-		log.Infof("Running initializeCommand from devcontainer.json: '%s'", strings.Join(args, " "))
-		writer := log.Writer(logrus.InfoLevel, false)
-		errwriter := log.Writer(logrus.ErrorLevel, false)
-		defer writer.Close()
-		defer errwriter.Close()
-
-		cmd := exec.Command(args[0], args[1:]...)
-		env := cmd.Environ()
-		env = append(env, extraEnvVars...)
-
-		cmd.Stdout = writer
-		cmd.Stderr = errwriter
-		cmd.Dir = workspaceFolder
-		cmd.Env = env
-		err := cmd.Run()
-		if err != nil {
-			return err
-		}
+	if err := runInitializeCommandHook(config.InitializeCommand, shellArgs, workspaceFolder, extraEnvVars, log); err != nil {
+		return err
 	}
 
 	return nil
+}
+
+func runInitializeCommandHook(
+	hook types.LifecycleHook,
+	shellArgs []string,
+	workspaceFolder string,
+	extraEnvVars []string,
+	log log.Logger,
+) error {
+	if len(hook) == 1 {
+		for _, command := range hook {
+			return runInitializeCommandEntry(command, shellArgs, workspaceFolder, extraEnvVars, log)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(hook))
+	for _, command := range hook {
+		command := command
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runInitializeCommandEntry(command, shellArgs, workspaceFolder, extraEnvVars, log); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		return err
+	}
+	return nil
+}
+
+func runInitializeCommandEntry(
+	command []string,
+	shellArgs []string,
+	workspaceFolder string,
+	extraEnvVars []string,
+	log log.Logger,
+) error {
+	var args []string
+	if len(command) == 1 {
+		args = []string{shellArgs[0], shellArgs[1], command[0]}
+	} else {
+		args = command
+	}
+	if len(args) == 0 {
+		return nil
+	}
+
+	log.Infof("Running initializeCommand from devcontainer.json: '%s'", strings.Join(args, " "))
+	writer := log.Writer(logrus.InfoLevel, false)
+	errwriter := log.Writer(logrus.ErrorLevel, false)
+	defer writer.Close()
+	defer errwriter.Close()
+
+	cmd := exec.Command(args[0], args[1:]...)
+	env := cmd.Environ()
+	env = append(env, extraEnvVars...)
+
+	cmd.Stdout = writer
+	cmd.Stderr = errwriter
+	cmd.Dir = workspaceFolder
+	cmd.Env = env
+	return cmd.Run()
 }
 
 func getWorkspace(
@@ -243,7 +287,11 @@ func getWorkspace(
 
 	containerMountFolder := conf.WorkspaceFolder
 	if containerMountFolder == "" {
-		containerMountFolder = "/workspaces/" + workspaceID
+		if isDockerComposeConfig(conf) {
+			containerMountFolder = "/"
+		} else {
+			containerMountFolder = "/workspaces/" + workspaceID
+		}
 	}
 
 	consistency := ""

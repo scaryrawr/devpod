@@ -11,8 +11,8 @@ import (
 	"github.com/loft-sh/devpod/pkg/devcontainer/metadata"
 	"github.com/loft-sh/devpod/pkg/dockerfile"
 	"github.com/loft-sh/devpod/pkg/id"
-	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/log/hash"
+	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/pkg/errors"
 )
 
@@ -100,6 +100,7 @@ func NewOptions(
 	} else {
 		buildOptions.BuildArgs["BUILDKIT_INLINE_CACHE"] = "1"
 	}
+	buildOptions.CacheFrom = append(buildOptions.CacheFrom, parsedConfig.Config.GetCacheFrom()...)
 
 	return buildOptions, nil
 }

@@ -1,8 +1,15 @@
 package setup
 
 import (
+	"os/user"
+	"runtime"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/types"
+	"gotest.tools/assert"
 )
 
 func TestGetLifecycleHookCommandArgs(t *testing.T) {
@@ -30,5 +37,27 @@ func TestGetLifecycleHookCommandArgs(t *testing.T) {
 				t.Fatalf("expected %v, got %v", testCase.expect, got)
 			}
 		})
+	}
+}
+
+func TestRunLifecycleHookRunsObjectCommandsInParallel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command timing test requires sh")
+	}
+
+	currentUser, err := user.Current()
+	assert.NilError(t, err)
+
+	hook := types.LifecycleHook{
+		"one": []string{"sh", "-c", "sleep 1"},
+		"two": []string{"sh", "-c", "sleep 1"},
+	}
+
+	start := time.Now()
+	err = runLifecycleHook(hook, currentUser.Username, currentUser.Username, ".", nil, "postStartCommand", log.Discard)
+	assert.NilError(t, err)
+
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("expected object lifecycle entries to run in parallel, took %s", elapsed)
 	}
 }

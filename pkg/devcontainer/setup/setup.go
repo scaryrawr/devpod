@@ -167,7 +167,7 @@ func ChownWorkspace(setupInfo *config.Result, recursive bool, log log.Logger) er
 		}
 	}
 
-	if recursive {
+	if recursive && shouldChownWorkspace(setupInfo.SubstitutionContext.ContainerWorkspaceFolder) {
 		log.Infof("Chown projects...")
 		err = copy2.ChownR(setupInfo.SubstitutionContext.ContainerWorkspaceFolder, user)
 		// do not exit on error, we can have non-fatal errors
@@ -177,6 +177,10 @@ func ChownWorkspace(setupInfo *config.Result, recursive bool, log log.Logger) er
 	}
 
 	return nil
+}
+
+func shouldChownWorkspace(workspaceFolder string) bool {
+	return filepath.Clean(workspaceFolder) != string(filepath.Separator)
 }
 
 func PatchEtcProfile() error {
