@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/loft-sh/devpod/pkg/command"
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
 	"github.com/loft-sh/devpod/pkg/types"
 	"github.com/loft-sh/log"
@@ -101,18 +100,19 @@ func run(commands []types.LifecycleHook, remoteUser, dir string, remoteEnv map[s
 			if err != nil {
 				return err
 			}
-			args := []string{}
-			if remoteUser != currentUser.Username {
-				args = append(args, "su", remoteUser, "-c", command.Quote(c))
-			} else {
-				args = append(args, "sh", "-c", command.Quote(c))
-			}
+			args := getLifecycleHookCommandArgs(c)
 
 			// create command
 			cmd := exec.Command(args[0], args[1:]...)
 			cmd.Dir = dir
 			cmd.Env = os.Environ()
 			cmd.Env = append(cmd.Env, remoteEnvArr...)
+			if remoteUser != currentUser.Username {
+				err := config.PrepareCmdUser(cmd, remoteUser)
+				if err != nil {
+					return fmt.Errorf("prepare command user %s: %w", remoteUser, err)
+				}
+			}
 
 			// Create pipes for stdout and stderr
 			stdoutPipe, err := cmd.StdoutPipe()
@@ -147,7 +147,7 @@ func run(commands []types.LifecycleHook, remoteUser, dir string, remoteEnv map[s
 			wg.Wait()
 			err = cmd.Wait()
 			if err != nil {
-				log.Debugf("Failed running postCreateCommand lifecycle script %s: %v", cmd.Args, err)
+				log.Debugf("Failed running %s lifecycle script %s: %v", name, cmd.Args, err)
 				return fmt.Errorf("failed to run: %s, error: %w", strings.Join(c, " "), err)
 			}
 
@@ -156,6 +156,14 @@ func run(commands []types.LifecycleHook, remoteUser, dir string, remoteEnv map[s
 	}
 
 	return nil
+}
+
+func getLifecycleHookCommandArgs(cmd []string) []string {
+	if len(cmd) == 1 {
+		return []string{"sh", "-c", cmd[0]}
+	}
+
+	return cmd
 }
 
 func logPipeOutput(log log.Logger, pipe io.ReadCloser, level logrus.Level) {
