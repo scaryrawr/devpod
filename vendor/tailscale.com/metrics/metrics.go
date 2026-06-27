@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package metrics contains expvar & Prometheus types and code used by
@@ -11,6 +11,8 @@ import (
 	"io"
 	"slices"
 	"strings"
+
+	"tailscale.com/syncs"
 )
 
 // Set is a string-to-Var map variable that satisfies the expvar.Var
@@ -27,6 +29,21 @@ type Set struct {
 	expvar.Map
 }
 
+// NewSet creates and publishes a new Set with the given name.
+func NewSet(name string) *Set {
+	s := &Set{}
+	expvar.Publish(name, s)
+	return s
+}
+
+// NewLabelMap creates a new LabelMap metric with the given
+// metric name and label name, and adds it to the Set.
+func (s *Set) NewLabelMap(metric, label string) *LabelMap {
+	m := &LabelMap{Label: label}
+	s.Set(metric, m)
+	return m
+}
+
 // LabelMap is a string-to-Var map variable that satisfies the
 // expvar.Var interface.
 //
@@ -37,6 +54,16 @@ type Set struct {
 type LabelMap struct {
 	Label string
 	expvar.Map
+	// shardedIntMu orders the initialization of new shardedint keys
+	shardedIntMu syncs.Mutex
+}
+
+// NewLabelMap creates and publishes a new LabelMap metric with the given
+// metric name and label name.
+func NewLabelMap(metric, label string) *LabelMap {
+	m := &LabelMap{Label: label}
+	expvar.Publish(metric, m)
+	return m
 }
 
 // SetInt64 sets the *Int value stored under the given map key.
@@ -44,11 +71,41 @@ func (m *LabelMap) SetInt64(key string, v int64) {
 	m.Get(key).Set(v)
 }
 
+// Add adds delta to the any int-like value stored under the given map key.
+func (m *LabelMap) Add(key string, delta int64) {
+	type intAdder interface {
+		Add(delta int64)
+	}
+	o := m.Map.Get(key)
+	if o == nil {
+		m.Map.Add(key, delta)
+		return
+	}
+	o.(intAdder).Add(delta)
+}
+
 // Get returns a direct pointer to the expvar.Int for key, creating it
 // if necessary.
 func (m *LabelMap) Get(key string) *expvar.Int {
 	m.Add(key, 0)
 	return m.Map.Get(key).(*expvar.Int)
+}
+
+// GetShardedInt returns a direct pointer to the syncs.ShardedInt for key,
+// creating it if necessary.
+func (m *LabelMap) GetShardedInt(key string) *syncs.ShardedInt {
+	i := m.Map.Get(key)
+	if i == nil {
+		m.shardedIntMu.Lock()
+		defer m.shardedIntMu.Unlock()
+		i = m.Map.Get(key)
+		if i != nil {
+			return i.(*syncs.ShardedInt)
+		}
+		i = syncs.NewShardedInt()
+		m.Set(key, i)
+	}
+	return i.(*syncs.ShardedInt)
 }
 
 // GetIncrFunc returns a function that increments the expvar.Int named by key.

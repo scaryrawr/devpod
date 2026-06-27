@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package netmon
@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"tailscale.com/types/logger"
+	"tailscale.com/util/eventbus"
 )
 
 // unspecifiedMessage is a minimal message implementation that should not
@@ -24,7 +25,7 @@ type devdConn struct {
 	conn net.Conn
 }
 
-func newOSMon(logf logger.Logf, m *Monitor) (osMon, error) {
+func newOSMon(_ *eventbus.Bus, logf logger.Logf, m *Monitor) (osMon, error) {
 	conn, err := net.Dial("unixpacket", "/var/run/devd.seqpacket.pipe")
 	if err != nil {
 		logf("devd dial error: %v, falling back to polling method", err)
@@ -32,8 +33,6 @@ func newOSMon(logf logger.Logf, m *Monitor) (osMon, error) {
 	}
 	return &devdConn{conn}, nil
 }
-
-func (c *devdConn) IsInterestingInterface(iface string) bool { return true }
 
 func (c *devdConn) Close() error {
 	return c.conn.Close()

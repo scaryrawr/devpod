@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package ipnlocal
@@ -156,5 +156,6 @@ func isNotableNotify(n *ipn.Notify) bool {
 		n.Health != nil ||
 		len(n.IncomingFiles) > 0 ||
 		len(n.OutgoingFiles) > 0 ||
-		n.FilesWaiting != nil
+		n.FilesWaiting != nil ||
+		n.SuggestedExitNode != nil
 }

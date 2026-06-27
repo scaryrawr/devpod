@@ -1,11 +1,10 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package netutil
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -63,6 +62,11 @@ func CheckIPForwarding(routes []netip.Prefix, state *netmon.State) (warn, err er
 		switch runtime.GOOS {
 		case "dragonfly", "freebsd", "netbsd", "openbsd":
 			return fmt.Errorf("Subnet routing and exit nodes only work with additional manual configuration on %v, and is not currently officially supported.", runtime.GOOS), nil
+		case "illumos", "solaris":
+			_, err := ipForwardingEnabledSunOS(ipv4, "")
+			if err != nil {
+				return nil, fmt.Errorf("Couldn't check system's IP forwarding configuration, subnet routing/exit nodes may not work: %w%s", err, "")
+			}
 		}
 		return nil, nil
 	}
@@ -141,64 +145,6 @@ func CheckIPForwarding(routes []netip.Prefix, state *netmon.State) (warn, err er
 	return nil, nil
 }
 
-// CheckReversePathFiltering reports whether reverse path filtering is either
-// disabled or set to 'loose' mode for exit node functionality on any
-// interface.
-//
-// The routes should only be advertised routes, and should not contain the
-// node's Tailscale IPs.
-//
-// This function returns an error if it is unable to determine whether reverse
-// path filtering is enabled, or a warning describing configuration issues if
-// reverse path fitering is non-functional or partly functional.
-func CheckReversePathFiltering(state *netmon.State) (warn []string, err error) {
-	if runtime.GOOS != "linux" {
-		return nil, nil
-	}
-
-	if state == nil {
-		return nil, errors.New("no link state")
-	}
-
-	// The kernel uses the maximum value for rp_filter between the 'all'
-	// setting and each per-interface config, so we need to fetch both.
-	allSetting, err := reversePathFilterValueLinux("all")
-	if err != nil {
-		return nil, fmt.Errorf("reading global rp_filter value: %w", err)
-	}
-
-	const (
-		filtOff    = 0
-		filtStrict = 1
-		filtLoose  = 2
-	)
-
-	// Because the kernel use the max rp_filter value, each interface will use 'loose', so we
-	// can abort early.
-	if allSetting == filtLoose {
-		return nil, nil
-	}
-
-	for _, iface := range state.Interface {
-		if iface.IsLoopback() {
-			continue
-		}
-
-		iSetting, err := reversePathFilterValueLinux(iface.Name)
-		if err != nil {
-			return nil, fmt.Errorf("reading interface rp_filter value for %q: %w", iface.Name, err)
-		}
-		// Perform the same max() that the kernel does
-		if allSetting > iSetting {
-			iSetting = allSetting
-		}
-		if iSetting == filtStrict {
-			warn = append(warn, fmt.Sprintf("interface %q has strict reverse-path filtering enabled", iface.Name))
-		}
-	}
-	return warn, nil
-}
-
 // ipForwardSysctlKey returns the sysctl key for the given protocol and iface.
 // When the dotFormat parameter is true the output is formatted as `net.ipv4.ip_forward`,
 // else it is `net/ipv4/ip_forward`
@@ -222,25 +168,6 @@ func ipForwardSysctlKey(format sysctlFormat, p protocol, iface string) string {
 	} else {
 		k = "net/ipv6/conf/%s/forwarding"
 	}
-	if format == dotFormat {
-		// Swap the delimiters.
-		iface = strings.ReplaceAll(iface, ".", "/")
-		k = strings.ReplaceAll(k, "/", ".")
-	}
-	return fmt.Sprintf(k, iface)
-}
-
-// rpFilterSysctlKey returns the sysctl key for the given iface.
-//
-// Format controls whether the output is formatted as
-// `net.ipv4.conf.iface.rp_filter` or `net/ipv4/conf/iface/rp_filter`.
-func rpFilterSysctlKey(format sysctlFormat, iface string) string {
-	// No iface means all interfaces
-	if iface == "" {
-		iface = "all"
-	}
-
-	k := "net/ipv4/conf/%s/rp_filter"
 	if format == dotFormat {
 		// Swap the delimiters.
 		iface = strings.ReplaceAll(iface, ".", "/")
@@ -300,28 +227,23 @@ func ipForwardingEnabledLinux(p protocol, iface string) (bool, error) {
 	return on, nil
 }
 
-// reversePathFilterValueLinux reports the reverse path filter setting on Linux
-// for the given interface.
-//
-// The iface param determines which interface to check against; the empty
-// string means to check the global config.
-//
-// This function tries to look up the value directly from `/proc/sys`, and
-// falls back to using the `sysctl` command on failure.
-func reversePathFilterValueLinux(iface string) (int, error) {
-	k := rpFilterSysctlKey(slashFormat, iface)
-	bs, err := os.ReadFile(filepath.Join("/proc/sys", k))
-	if err != nil {
-		// Fall back to the sysctl command
-		k := rpFilterSysctlKey(dotFormat, iface)
-		bs, err = exec.Command("sysctl", "-n", k).Output()
-		if err != nil {
-			return -1, fmt.Errorf("couldn't check %s (%v)", k, err)
-		}
+func ipForwardingEnabledSunOS(p protocol, iface string) (bool, error) {
+	var proto string
+	if p == ipv4 {
+		proto = "ipv4"
+	} else if p == ipv6 {
+		proto = "ipv6"
+	} else {
+		return false, fmt.Errorf("unknown protocol")
 	}
-	v, err := strconv.Atoi(string(bytes.TrimSpace(bs)))
+
+	ipadmCmd := "\"ipadm show-prop " + proto + " -p forwarding -o CURRENT -c\""
+	bs, err := exec.Command("ipadm", "show-prop", proto, "-p", "forwarding", "-o", "CURRENT", "-c").Output()
 	if err != nil {
-		return -1, fmt.Errorf("couldn't parse %s (%v)", k, err)
+		return false, fmt.Errorf("couldn't check %s (%v).\nSubnet routes won't work without IP forwarding.", ipadmCmd, err)
 	}
-	return v, nil
+	if string(bs) != "on\n" {
+		return false, fmt.Errorf("IP forwarding is set to off. Subnet routes won't work. Try 'routeadm -u -e %s-forwarding'", proto)
+	}
+	return true, nil
 }

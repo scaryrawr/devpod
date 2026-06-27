@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux
@@ -47,7 +47,7 @@ func synologyProxyFromConfigCached(req *http.Request) (*url.URL, error) {
 	var err error
 	modtime := mtime(synologyProxyConfigPath)
 
-	if modtime != cache.updated {
+	if !modtime.Equal(cache.updated) {
 		cache.httpProxy, cache.httpsProxy, err = synologyProxiesFromConfig()
 		cache.updated = modtime
 	}

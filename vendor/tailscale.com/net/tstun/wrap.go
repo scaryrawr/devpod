@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package tstun
@@ -22,10 +22,9 @@ import (
 	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun"
 	"go4.org/mem"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"tailscale.com/disco"
-	tsmetrics "tailscale.com/metrics"
-	"tailscale.com/net/connstats"
+	"tailscale.com/envknob"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/packet/checksum"
 	"tailscale.com/net/tsaddr"
@@ -34,9 +33,10 @@ import (
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/netlogfunc"
 	"tailscale.com/util/clientmetric"
+	"tailscale.com/util/eventbus"
 	"tailscale.com/util/usermetric"
-	"tailscale.com/wgengine/capture"
 	"tailscale.com/wgengine/filter"
 	"tailscale.com/wgengine/netstack/gro"
 	"tailscale.com/wgengine/wgcfg"
@@ -53,7 +53,8 @@ const PacketStartOffset = device.MessageTransportHeaderSize
 // of a packet that can be injected into a tstun.Wrapper.
 const MaxPacketSize = device.MaxContentSize
 
-const tapDebug = false // for super verbose TAP debugging
+// TAPDebug is whether super verbose TAP debugging is enabled.
+const TAPDebug = false
 
 var (
 	// ErrClosed is returned when attempting an operation on a closed Wrapper.
@@ -171,6 +172,9 @@ type Wrapper struct {
 	// PreFilterPacketInboundFromWireGuard is the inbound filter function that runs before the main filter
 	// and therefore sees the packets that may be later dropped by it.
 	PreFilterPacketInboundFromWireGuard FilterFunc
+	// PostFilterPacketInboundFromWireGuardAppConnector runs after the filter, but before PostFilterPacketInboundFromWireGuard.
+	// Non-app connector traffic is passed along. Invalid app connector traffic is dropped.
+	PostFilterPacketInboundFromWireGuardAppConnector FilterFunc
 	// PostFilterPacketInboundFromWireGuard is the inbound filter function that runs after the main filter.
 	PostFilterPacketInboundFromWireGuard GROFilterFunc
 	// PreFilterPacketOutboundToWireGuardNetstackIntercept is a filter function that runs before the main filter
@@ -183,6 +187,10 @@ type Wrapper struct {
 	// packets which it handles internally. If both this and PreFilterFromTunToNetstack
 	// filter functions are non-nil, this filter runs second.
 	PreFilterPacketOutboundToWireGuardEngineIntercept FilterFunc
+	// PreFilterPacketOutboundToWireGuardAppConnectorIntercept runs after PreFilterPacketOutboundToWireGuardEngineIntercept
+	// for app connector specific traffic. Non-app connector traffic is passed along. Invalid app connector traffic is
+	// dropped.
+	PreFilterPacketOutboundToWireGuardAppConnectorIntercept FilterFunc
 	// PostFilterPacketOutboundToWireGuard is the outbound filter function that runs after the main filter.
 	PostFilterPacketOutboundToWireGuard FilterFunc
 
@@ -204,17 +212,20 @@ type Wrapper struct {
 	// disableTSMPRejected disables TSMP rejected responses. For tests.
 	disableTSMPRejected bool
 
-	// stats maintains per-connection counters.
-	stats atomic.Pointer[connstats.Statistics]
+	// connCounter maintains per-connection counters.
+	connCounter syncs.AtomicValue[netlogfunc.ConnectionCounter]
 
-	captureHook syncs.AtomicValue[capture.Callback]
+	captureHook syncs.AtomicValue[packet.CaptureCallback]
 
 	metrics *metrics
+
+	eventClient              *eventbus.Client
+	discoKeyAdvertisementPub *eventbus.Publisher[DiscoKeyAdvertisement]
 }
 
 type metrics struct {
-	inboundDroppedPacketsTotal  *tsmetrics.MultiLabelMap[usermetric.DropLabels]
-	outboundDroppedPacketsTotal *tsmetrics.MultiLabelMap[usermetric.DropLabels]
+	inboundDroppedPacketsTotal  *usermetric.MultiLabelMap[usermetric.DropLabels]
+	outboundDroppedPacketsTotal *usermetric.MultiLabelMap[usermetric.DropLabels]
 }
 
 func registerMetrics(reg *usermetric.Registry) *metrics {
@@ -228,7 +239,7 @@ func registerMetrics(reg *usermetric.Registry) *metrics {
 type tunInjectedRead struct {
 	// Only one of packet or data should be set, and are read in that order of
 	// precedence.
-	packet *stack.PacketBuffer
+	packet *netstack_PacketBuffer
 	data   []byte
 }
 
@@ -255,15 +266,15 @@ func (w *Wrapper) Start() {
 	close(w.startCh)
 }
 
-func WrapTAP(logf logger.Logf, tdev tun.Device, m *usermetric.Registry) *Wrapper {
-	return wrap(logf, tdev, true, m)
+func WrapTAP(logf logger.Logf, tdev tun.Device, m *usermetric.Registry, bus *eventbus.Bus) *Wrapper {
+	return wrap(logf, tdev, true, m, bus)
 }
 
-func Wrap(logf logger.Logf, tdev tun.Device, m *usermetric.Registry) *Wrapper {
-	return wrap(logf, tdev, false, m)
+func Wrap(logf logger.Logf, tdev tun.Device, m *usermetric.Registry, bus *eventbus.Bus) *Wrapper {
+	return wrap(logf, tdev, false, m, bus)
 }
 
-func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry) *Wrapper {
+func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry, bus *eventbus.Bus) *Wrapper {
 	logf = logger.WithPrefix(logf, "tstun: ")
 	w := &Wrapper{
 		logf:        logf,
@@ -283,6 +294,9 @@ func wrap(logf logger.Logf, tdev tun.Device, isTAP bool, m *usermetric.Registry)
 		startCh:     make(chan struct{}),
 		metrics:     registerMetrics(m),
 	}
+
+	w.eventClient = bus.Client("net.tstun")
+	w.discoKeyAdvertisementPub = eventbus.Publish[DiscoKeyAdvertisement](w.eventClient)
 
 	w.vectorBuffer = make([][]byte, tdev.BatchSize())
 	for i := range w.vectorBuffer {
@@ -312,7 +326,9 @@ func (t *Wrapper) now() time.Time {
 //
 // The map ownership passes to the Wrapper. It must be non-nil.
 func (t *Wrapper) SetDestIPActivityFuncs(m map[netip.Addr]func()) {
-	t.destIPActivity.Store(m)
+	if buildfeatures.HasLazyWG {
+		t.destIPActivity.Store(m)
+	}
 }
 
 // SetDiscoKey sets the current discovery key.
@@ -356,6 +372,7 @@ func (t *Wrapper) Close() error {
 		close(t.vectorOutbound)
 		t.outboundMu.Unlock()
 		err = t.tdev.Close()
+		t.eventClient.Close()
 	})
 	return err
 }
@@ -459,7 +476,7 @@ func (t *Wrapper) pollVector() {
 				return
 			}
 			n, err = reader(t.vectorBuffer[:], sizes, readOffset)
-			if t.isTAP && tapDebug {
+			if t.isTAP && TAPDebug {
 				s := fmt.Sprintf("% x", t.vectorBuffer[0][:])
 				for strings.HasSuffix(s, " 00") {
 					s = strings.TrimSuffix(s, " 00")
@@ -792,7 +809,9 @@ func (pc *peerConfigTable) outboundPacketIsJailed(p *packet.Parsed) bool {
 	return c.jailed
 }
 
-type setIPer interface {
+// SetIPer is the interface expected to be implemented by the TAP implementation
+// of tun.Device.
+type SetIPer interface {
 	// SetIP sets the IP addresses of the TAP device.
 	SetIP(ipV4, ipV6 netip.Addr) error
 }
@@ -800,7 +819,7 @@ type setIPer interface {
 // SetWGConfig is called when a new NetworkMap is received.
 func (t *Wrapper) SetWGConfig(wcfg *wgcfg.Config) {
 	if t.isTAP {
-		if sip, ok := t.tdev.(setIPer); ok {
+		if sip, ok := t.tdev.(SetIPer); ok {
 			sip.SetIP(findV4(wcfg.Addresses), findV6(wcfg.Addresses))
 		}
 	}
@@ -861,6 +880,12 @@ func (t *Wrapper) filterPacketOutboundToWireGuard(p *packet.Parsed, pc *peerConf
 			return res, gro
 		}
 	}
+	if t.PreFilterPacketOutboundToWireGuardAppConnectorIntercept != nil {
+		if res := t.PreFilterPacketOutboundToWireGuardAppConnectorIntercept(p, t); res.IsDrop() {
+			// Handled by userspaceEngine's configured hook for Connectors 2025 app connectors.
+			return res, gro
+		}
+	}
 
 	// If the outbound packet is to a jailed peer, use our jailed peer
 	// packet filter.
@@ -874,12 +899,13 @@ func (t *Wrapper) filterPacketOutboundToWireGuard(p *packet.Parsed, pc *peerConf
 		return filter.Drop, gro
 	}
 
-	if filt.RunOut(p, t.filterFlags) != filter.Accept {
+	if resp, reason := filt.RunOut(p, t.filterFlags); resp != filter.Accept {
 		metricPacketOutDropFilter.Add(1)
-		// TODO(#14280): increment a t.metrics.outboundDroppedPacketsTotal here
-		// once we figure out & document what labels to use for multicast,
-		// link-local-unicast, IP fragments, etc. But they're not
-		// usermetric.ReasonACL.
+		if reason != "" {
+			t.metrics.outboundDroppedPacketsTotal.Add(usermetric.DropLabels{
+				Reason: reason,
+			}, 1)
+		}
 		return filter.Drop, gro
 	}
 
@@ -904,9 +930,23 @@ func (t *Wrapper) IdleDuration() time.Duration {
 	return mono.Since(t.lastActivityAtomic.LoadAtomic())
 }
 
+func (t *Wrapper) awaitStart() {
+	for {
+		select {
+		case <-t.startCh:
+			return
+		case <-time.After(1 * time.Second):
+			// Multiple times while remixing tailscaled I (Brad) have forgotten
+			// to call Start and then wasted far too much time debugging.
+			// I do not wish that debugging on anyone else. Hopefully this'll help:
+			t.logf("tstun: awaiting Wrapper.Start call")
+		}
+	}
+}
+
 func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 	if !t.started.Load() {
-		<-t.startCh
+		t.awaitStart()
 	}
 	// packet from OS read and sent to WG
 	res, ok := <-t.vectorOutbound
@@ -931,13 +971,15 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 	for _, data := range res.data {
 		p.Decode(data[res.dataOffset:])
 
-		if m := t.destIPActivity.Load(); m != nil {
-			if fn := m[p.Dst.Addr()]; fn != nil {
-				fn()
+		if buildfeatures.HasLazyWG {
+			if m := t.destIPActivity.Load(); m != nil {
+				if fn := m[p.Dst.Addr()]; fn != nil {
+					fn()
+				}
 			}
 		}
-		if captHook != nil {
-			captHook(capture.FromLocal, t.now(), p.Buffer(), p.CaptureMeta)
+		if buildfeatures.HasCapture && captHook != nil {
+			captHook(packet.FromLocal, t.now(), p.Buffer(), p.CaptureMeta)
 		}
 		if !t.disableFilter {
 			var response filter.Response
@@ -945,6 +987,11 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 			if response != filter.Accept {
 				metricPacketOutDrop.Add(1)
 				continue
+			}
+		}
+		if buildfeatures.HasNetLog {
+			if update := t.connCounter.Load(); update != nil {
+				updateConnCounter(update, p.Buffer(), false)
 			}
 		}
 
@@ -956,9 +1003,6 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 			panic(fmt.Sprintf("short copy: %d != %d", n, len(data)-res.dataOffset))
 		}
 		sizes[buffsPos] = n
-		if stats := t.stats.Load(); stats != nil {
-			stats.UpdateTxVirtual(p.Buffer())
-		}
 		buffsPos++
 	}
 	if buffsGRO != nil {
@@ -981,7 +1025,10 @@ const (
 	minTCPHeaderSize = 20
 )
 
-func stackGSOToTunGSO(pkt []byte, gso stack.GSO) (tun.GSOOptions, error) {
+func stackGSOToTunGSO(pkt []byte, gso netstack_GSO) (tun.GSOOptions, error) {
+	if !buildfeatures.HasNetstack {
+		panic("unreachable")
+	}
 	options := tun.GSOOptions{
 		CsumStart:  gso.L3HdrLen,
 		CsumOffset: gso.CsumOffset,
@@ -989,12 +1036,12 @@ func stackGSOToTunGSO(pkt []byte, gso stack.GSO) (tun.GSOOptions, error) {
 		NeedsCsum:  gso.NeedsCsum,
 	}
 	switch gso.Type {
-	case stack.GSONone:
+	case netstack_GSONone:
 		options.GSOType = tun.GSONone
 		return options, nil
-	case stack.GSOTCPv4:
+	case netstack_GSOTCPv4:
 		options.GSOType = tun.GSOTCPv4
-	case stack.GSOTCPv6:
+	case netstack_GSOTCPv6:
 		options.GSOType = tun.GSOTCPv6
 	default:
 		return tun.GSOOptions{}, fmt.Errorf("unsupported gVisor GSOType: %v", gso.Type)
@@ -1017,7 +1064,10 @@ func stackGSOToTunGSO(pkt []byte, gso stack.GSO) (tun.GSOOptions, error) {
 // both before and after partial checksum updates where later checksum
 // offloading still expects a partial checksum.
 // TODO(jwhited): plumb partial checksum awareness into net/packet/checksum.
-func invertGSOChecksum(pkt []byte, gso stack.GSO) {
+func invertGSOChecksum(pkt []byte, gso netstack_GSO) {
+	if !buildfeatures.HasNetstack {
+		panic("unreachable")
+	}
 	if gso.NeedsCsum != true {
 		return
 	}
@@ -1031,10 +1081,13 @@ func invertGSOChecksum(pkt []byte, gso stack.GSO) {
 
 // injectedRead handles injected reads, which bypass filters.
 func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []int, offset int) (n int, err error) {
-	var gso stack.GSO
+	var gso netstack_GSO
 
 	pkt := outBuffs[0][offset:]
 	if res.packet != nil {
+		if !buildfeatures.HasNetstack {
+			panic("unreachable")
+		}
 		bufN := copy(pkt, res.packet.NetworkHeader().Slice())
 		bufN += copy(pkt[bufN:], res.packet.TransportHeader().Slice())
 		bufN += copy(pkt[bufN:], res.packet.Data().AsRange().ToSlice())
@@ -1057,9 +1110,11 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 	pc.snat(p)
 	invertGSOChecksum(pkt, gso)
 
-	if m := t.destIPActivity.Load(); m != nil {
-		if fn := m[p.Dst.Addr()]; fn != nil {
-			fn()
+	if buildfeatures.HasLazyWG {
+		if m := t.destIPActivity.Load(); m != nil {
+			if fn := m[p.Dst.Addr()]; fn != nil {
+				fn()
+			}
 		}
 	}
 
@@ -1072,9 +1127,11 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 		n, err = tun.GSOSplit(pkt, gsoOptions, outBuffs, sizes, offset)
 	}
 
-	if stats := t.stats.Load(); stats != nil {
-		for i := 0; i < n; i++ {
-			stats.UpdateTxVirtual(outBuffs[i][offset : offset+sizes[i]])
+	if buildfeatures.HasNetLog {
+		if update := t.connCounter.Load(); update != nil {
+			for i := 0; i < n; i++ {
+				updateConnCounter(update, outBuffs[i][offset:offset+sizes[i]], false)
+			}
 		}
 	}
 
@@ -1083,15 +1140,30 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 	return n, err
 }
 
-func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook capture.Callback, pc *peerConfigTable, gro *gro.GRO) (filter.Response, *gro.GRO) {
+// DiscoKeyAdvertisement is a TSMP message used for distributing disco keys.
+// This struct is used an an event on the [eventbus.Bus].
+type DiscoKeyAdvertisement struct {
+	Src netip.Addr // Src field is populated by the IP header of the packet, not from the payload itself.
+	Key key.DiscoPublic
+}
+
+func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook packet.CaptureCallback, pc *peerConfigTable, gro *gro.GRO) (filter.Response, *gro.GRO) {
 	if captHook != nil {
-		captHook(capture.FromPeer, t.now(), p.Buffer(), p.CaptureMeta)
+		captHook(packet.FromPeer, t.now(), p.Buffer(), p.CaptureMeta)
 	}
 
 	if p.IPProto == ipproto.TSMP {
 		if pingReq, ok := p.AsTSMPPing(); ok {
 			t.noteActivity()
 			t.injectOutboundPong(p, pingReq)
+			return filter.DropSilently, gro
+		} else if discoKeyAdvert, ok := p.AsTSMPDiscoAdvertisement(); ok {
+			if buildfeatures.HasCacheNetMap && envknob.Bool("TS_USE_CACHED_NETMAP") {
+				t.discoKeyAdvertisementPub.Publish(DiscoKeyAdvertisement{
+					Src: discoKeyAdvert.Src,
+					Key: discoKeyAdvert.Key,
+				})
+			}
 			return filter.DropSilently, gro
 		} else if data, ok := p.AsTSMPPong(); ok {
 			if f := t.OnTSMPPongReceived; f != nil {
@@ -1178,6 +1250,13 @@ func (t *Wrapper) filterPacketInboundFromWireGuard(p *packet.Parsed, captHook ca
 		return filter.Drop, gro
 	}
 
+	if t.PostFilterPacketInboundFromWireGuardAppConnector != nil {
+		if res := t.PostFilterPacketInboundFromWireGuardAppConnector(p, t); res.IsDrop() {
+			// Handled by userspaceEngine's configured hook for Connectors 2025 app connectors.
+			return res, gro
+		}
+	}
+
 	if t.PostFilterPacketInboundFromWireGuard != nil {
 		var res filter.Response
 		res, gro = t.PostFilterPacketInboundFromWireGuard(p, t, gro)
@@ -1240,9 +1319,11 @@ func (t *Wrapper) Write(buffs [][]byte, offset int) (int, error) {
 }
 
 func (t *Wrapper) tdevWrite(buffs [][]byte, offset int) (int, error) {
-	if stats := t.stats.Load(); stats != nil {
-		for i := range buffs {
-			stats.UpdateRxVirtual((buffs)[i][offset:])
+	if buildfeatures.HasNetLog {
+		if update := t.connCounter.Load(); update != nil {
+			for i := range buffs {
+				updateConnCounter(update, buffs[i][offset:], true)
+			}
 		}
 	}
 	return t.tdev.Write(buffs, offset)
@@ -1280,7 +1361,10 @@ func (t *Wrapper) SetJailedFilter(filt *filter.Filter) {
 //
 // This path is typically used to deliver synthesized packets to the
 // host networking stack.
-func (t *Wrapper) InjectInboundPacketBuffer(pkt *stack.PacketBuffer, buffs [][]byte, sizes []int) error {
+func (t *Wrapper) InjectInboundPacketBuffer(pkt *netstack_PacketBuffer, buffs [][]byte, sizes []int) error {
+	if !buildfeatures.HasNetstack {
+		panic("unreachable")
+	}
 	buf := buffs[0][PacketStartOffset:]
 
 	bufN := copy(buf, pkt.NetworkHeader().Slice())
@@ -1299,7 +1383,7 @@ func (t *Wrapper) InjectInboundPacketBuffer(pkt *stack.PacketBuffer, buffs [][]b
 	p.Decode(buf)
 	captHook := t.captureHook.Load()
 	if captHook != nil {
-		captHook(capture.SynthesizedToLocal, t.now(), p.Buffer(), p.CaptureMeta)
+		captHook(packet.SynthesizedToLocal, t.now(), p.Buffer(), p.CaptureMeta)
 	}
 
 	invertGSOChecksum(buf, pkt.GSOOptions)
@@ -1419,7 +1503,10 @@ func (t *Wrapper) InjectOutbound(pkt []byte) error {
 // InjectOutboundPacketBuffer logically behaves as InjectOutbound. It takes ownership of one
 // reference count on the packet, and the packet may be mutated. The packet refcount will be
 // decremented after the injected buffer has been read.
-func (t *Wrapper) InjectOutboundPacketBuffer(pkt *stack.PacketBuffer) error {
+func (t *Wrapper) InjectOutboundPacketBuffer(pkt *netstack_PacketBuffer) error {
+	if !buildfeatures.HasNetstack {
+		panic("unreachable")
+	}
 	size := pkt.Size()
 	if size > MaxPacketSize {
 		pkt.DecRef()
@@ -1431,7 +1518,7 @@ func (t *Wrapper) InjectOutboundPacketBuffer(pkt *stack.PacketBuffer) error {
 	}
 	if capt := t.captureHook.Load(); capt != nil {
 		b := pkt.ToBuffer()
-		capt(capture.SynthesizedToPeer, t.now(), b.Flatten(), packet.CaptureMeta{})
+		capt(packet.SynthesizedToPeer, t.now(), b.Flatten(), packet.CaptureMeta{})
 	}
 
 	t.injectOutbound(tunInjectedRead{packet: pkt})
@@ -1455,10 +1542,12 @@ func (t *Wrapper) Unwrap() tun.Device {
 	return t.tdev
 }
 
-// SetStatistics specifies a per-connection statistics aggregator.
+// SetConnectionCounter specifies a per-connection statistics aggregator.
 // Nil may be specified to disable statistics gathering.
-func (t *Wrapper) SetStatistics(stats *connstats.Statistics) {
-	t.stats.Store(stats)
+func (t *Wrapper) SetConnectionCounter(fn netlogfunc.ConnectionCounter) {
+	if buildfeatures.HasNetLog {
+		t.connCounter.Store(fn)
+	}
 }
 
 var (
@@ -1473,6 +1562,19 @@ var (
 	metricPacketOutDropSelfDisco = clientmetric.NewCounter("tstun_out_to_wg_drop_self_disco")
 )
 
-func (t *Wrapper) InstallCaptureHook(cb capture.Callback) {
+func (t *Wrapper) InstallCaptureHook(cb packet.CaptureCallback) {
+	if !buildfeatures.HasCapture {
+		return
+	}
 	t.captureHook.Store(cb)
+}
+
+func updateConnCounter(update netlogfunc.ConnectionCounter, b []byte, receive bool) {
+	var p packet.Parsed
+	p.Decode(b)
+	if receive {
+		update(p.IPProto, p.Dst, p.Src, 1, len(b), true)
+	} else {
+		update(p.IPProto, p.Src, p.Dst, 1, len(b), false)
+	}
 }

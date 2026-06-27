@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build !android
@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"strings"
 	"sync/atomic"
 
@@ -23,12 +22,9 @@ import (
 	"github.com/mdlayher/netlink"
 	"go4.org/mem"
 	"golang.org/x/sys/unix"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/util/lineiter"
-)
-
-const (
-	LOFT_ADMIN_HOST = "admin.loft.sh"
 )
 
 func init() {
@@ -46,6 +42,9 @@ ens18   00000000        0100000A        0003    0       0       0       00000000
 ens18   0000000A        00000000        0001    0       0       0       0000FFFF        0       0       0
 */
 func likelyHomeRouterIPLinux() (ret netip.Addr, myIP netip.Addr, ok bool) {
+	if !buildfeatures.HasPortMapper {
+		return
+	}
 	if procNetRouteErr.Load() {
 		// If we failed to read /proc/net/route previously, don't keep trying.
 		return ret, myIP, false
@@ -127,66 +126,7 @@ func likelyHomeRouterIPLinux() (ret netip.Addr, myIP netip.Addr, ok bool) {
 	return netip.Addr{}, netip.Addr{}, false
 }
 
-func resolveHostname(host string) (net.IP, error) {
-	// lookup ip
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return nil, err
-	}
-	// Prefer IPv4 addresses
-	for _, ip := range ips {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			return ipv4, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no IPv4 address found for %s", host)
-}
-
-func interfaceTo(ip net.IP) (string, error) {
-	cmd := exec.Command("ip", "route", "get", ip.String())
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to execute ip command: %w", err)
-	}
-
-	// Parse the output to find the interface name.
-	// Example output:
-	// "<ip> via <gateway> dev eth0 src <source-ip> uid <uid>\n    cache"
-	fields := strings.Fields(string(output))
-	for i, field := range fields {
-		if field == "dev" && i+1 < len(fields) {
-			return fields[i+1], nil
-		}
-	}
-	return "", fmt.Errorf("interface to %s not found", ip)
-}
-
-func getInterfaceByRoute(host string) (*net.Interface, error) {
-	ip, err := resolveHostname(host)
-
-	ifaceName, err := interfaceTo(ip)
-	if err != nil {
-		return nil, err
-	}
-
-	intf, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return nil, err
-	}
-	return intf, nil
-}
-
 func defaultRoute() (d DefaultRouteDetails, err error) {
-	// By default, try to fetch the interface using ip route command.
-	iface, err := getInterfaceByRoute(LOFT_ADMIN_HOST)
-	if err == nil {
-		d.InterfaceName = iface.Name
-		d.InterfaceIndex = iface.Index
-		return d, nil
-	}
-	// Fallback to default Tailscale logic.
-
 	v, err := defaultRouteInterfaceProcNet()
 	if err == nil {
 		d.InterfaceName = v

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package loggerx provides logging functions to the rest of the syspolicy packages.
@@ -10,7 +10,7 @@ import (
 
 	"tailscale.com/types/lazy"
 	"tailscale.com/types/logger"
-	"tailscale.com/util/syspolicy/internal"
+	"tailscale.com/util/testenv"
 )
 
 const (
@@ -58,7 +58,7 @@ func verbosef(format string, args ...any) {
 
 // SetForTest sets the specified printf and verbosef functions for the duration
 // of tb and its subtests.
-func SetForTest(tb internal.TB, printf, verbosef logger.Logf) {
+func SetForTest(tb testenv.TB, printf, verbosef logger.Logf) {
 	lazyPrintf.SetForTest(tb, printf, nil)
 	lazyVerbosef.SetForTest(tb, verbosef, nil)
 }

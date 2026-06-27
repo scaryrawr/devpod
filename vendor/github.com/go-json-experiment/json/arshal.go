@@ -2,35 +2,38 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build !goexperiment.jsonv2 || !go1.25
+
 package json
 
 import (
 	"bytes"
-	"errors"
+	"encoding"
 	"io"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-json-experiment/json/internal"
 	"github.com/go-json-experiment/json/internal/jsonflags"
 	"github.com/go-json-experiment/json/internal/jsonopts"
-	"github.com/go-json-experiment/json/internal/jsonwire"
 	"github.com/go-json-experiment/json/jsontext"
+)
+
+// Reference encoding and time packages to assist pkgsite
+// in being able to hotlink references to those packages.
+var (
+	_ encoding.TextMarshaler
+	_ encoding.TextAppender
+	_ encoding.TextUnmarshaler
+	_ time.Time
+	_ time.Duration
 )
 
 // export exposes internal functionality of the "jsontext" package.
 var export = jsontext.Internal.Export(&internal.AllowInternalUse)
-
-var structOptionsPool = &sync.Pool{New: func() any { return new(jsonopts.Struct) }}
-
-func getStructOptions() *jsonopts.Struct {
-	return structOptionsPool.Get().(*jsonopts.Struct)
-}
-func putStructOptions(o *jsonopts.Struct) {
-	*o = jsonopts.Struct{}
-	structOptionsPool.Put(o)
-}
 
 // Marshal serializes a Go value as a []byte according to the provided
 // marshal and encode options (while ignoring unmarshal or decode options).
@@ -52,11 +55,15 @@ func putStructOptions(o *jsonopts.Struct) {
 //     If all applicable functions return [SkipFunc],
 //     then the value is encoded according to subsequent rules.
 //
-//   - If the value type implements [MarshalerV2],
-//     then the MarshalJSONV2 method is called to encode the value.
+//   - If the value type implements [MarshalerTo],
+//     then the MarshalJSONTo method is called to encode the value.
 //
-//   - If the value type implements [MarshalerV1],
+//   - If the value type implements [Marshaler],
 //     then the MarshalJSON method is called to encode the value.
+//
+//   - If the value type implements [encoding.TextAppender],
+//     then the AppendText method is called to encode the value and
+//     subsequently encode its result as a JSON string.
 //
 //   - If the value type implements [encoding.TextMarshaler],
 //     then the MarshalText method is called to encode the value and
@@ -90,11 +97,12 @@ func putStructOptions(o *jsonopts.Struct) {
 //     where each byte is recursively JSON-encoded as each JSON array element.
 //
 //   - A Go integer is encoded as a JSON number without fractions or exponents.
-//     If [StringifyNumbers] is specified, then the JSON number is
-//     encoded within a JSON string. It does not support any custom format flags.
+//     If [StringifyNumbers] is specified or encoding a JSON object name,
+//     then the JSON number is encoded within a JSON string.
+//     It does not support any custom format flags.
 //
 //   - A Go float is encoded as a JSON number.
-//     If [StringifyNumbers] is specified,
+//     If [StringifyNumbers] is specified or encoding a JSON object name,
 //     then the JSON number is encoded within a JSON string.
 //     If the format is "nonfinite", then NaN, +Inf, and -Inf are encoded as
 //     the JSON strings "NaN", "Infinity", and "-Infinity", respectively.
@@ -103,10 +111,8 @@ func putStructOptions(o *jsonopts.Struct) {
 //   - A Go map is encoded as a JSON object, where each Go map key and value
 //     is recursively encoded as a name and value pair in the JSON object.
 //     The Go map key must encode as a JSON string, otherwise this results
-//     in a [SemanticError]. When encoding keys, [StringifyNumbers]
-//     is automatically applied so that numeric keys encode as JSON strings.
-//     The Go map is traversed in a non-deterministic order.
-//     For deterministic encoding, consider using [jsontext.Value.Canonicalize].
+//     in a [SemanticError]. The Go map is traversed in a non-deterministic order.
+//     For deterministic encoding, consider using the [Deterministic] option.
 //     If the format is "emitnull", then a nil map is encoded as a JSON null.
 //     If the format is "emitempty", then a nil map is encoded as an empty JSON object,
 //     regardless of whether [FormatNilMapAsNull] is specified.
@@ -141,19 +147,23 @@ func putStructOptions(o *jsonopts.Struct) {
 //     If the format matches one of the format constants declared
 //     in the time package (e.g., RFC1123), then that format is used.
 //     If the format is "unix", "unixmilli", "unixmicro", or "unixnano",
-//     then the timestamp is encoded as a JSON number of the number of seconds
-//     (or milliseconds, microseconds, or nanoseconds) since the Unix epoch,
-//     which is January 1st, 1970 at 00:00:00 UTC.
+//     then the timestamp is encoded as a possibly fractional JSON number
+//     of the number of seconds (or milliseconds, microseconds, or nanoseconds)
+//     since the Unix epoch, which is January 1st, 1970 at 00:00:00 UTC.
+//     To avoid a fractional component, round the timestamp to the relevant unit.
 //     Otherwise, the format is used as-is with [time.Time.Format] if non-empty.
 //
-//   - A Go [time.Duration] is encoded as a JSON string containing the duration
-//     formatted according to [time.Duration.String].
+//   - A Go [time.Duration] currently has no default representation and
+//     requires an explicit format to be specified.
 //     If the format is "sec", "milli", "micro", or "nano",
-//     then the duration is encoded as a JSON number of the number of seconds
-//     (or milliseconds, microseconds, or nanoseconds) in the duration.
-//     If the format is "base60", it is encoded as a JSON string
-//     using the "H:MM:SS.SSSSSSSSS" representation.
-//     If the format is "units", it uses [time.Duration.String].
+//     then the duration is encoded as a possibly fractional JSON number
+//     of the number of seconds (or milliseconds, microseconds, or nanoseconds).
+//     To avoid a fractional component, round the duration to the relevant unit.
+//     If the format is "units", it is encoded as a JSON string formatted using
+//     [time.Duration.String] (e.g., "1h30m" for 1 hour 30 minutes).
+//     If the format is "iso8601", it is encoded as a JSON string using the
+//     ISO 8601 standard for durations (e.g., "PT1H30M" for 1 hour 30 minutes)
+//     using only accurate units of hours, minutes, and seconds.
 //
 //   - All other Go types (e.g., complex numbers, channels, and functions)
 //     have no default representation and result in a [SemanticError].
@@ -166,6 +176,9 @@ func Marshal(in any, opts ...Options) (out []byte, err error) {
 	xe := export.Encoder(enc)
 	xe.Flags.Set(jsonflags.OmitTopLevelNewline | 1)
 	err = marshalEncode(enc, in, &xe.Struct)
+	if err != nil && xe.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+		return nil, internal.TransformMarshalError(in, err)
+	}
 	return bytes.Clone(xe.Buf), err
 }
 
@@ -178,21 +191,33 @@ func MarshalWrite(out io.Writer, in any, opts ...Options) (err error) {
 	defer export.PutStreamingEncoder(enc)
 	xe := export.Encoder(enc)
 	xe.Flags.Set(jsonflags.OmitTopLevelNewline | 1)
-	return marshalEncode(enc, in, &xe.Struct)
+	err = marshalEncode(enc, in, &xe.Struct)
+	if err != nil && xe.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+		return internal.TransformMarshalError(in, err)
+	}
+	return err
 }
 
 // MarshalEncode serializes a Go value into an [jsontext.Encoder] according to
 // the provided marshal options (while ignoring unmarshal, encode, or decode options).
+// Any marshal-relevant options already specified on the [jsontext.Encoder]
+// take lower precedence than the set of options provided by the caller.
 // Unlike [Marshal] and [MarshalWrite], encode options are ignored because
 // they must have already been specified on the provided [jsontext.Encoder].
+//
 // See [Marshal] for details about the conversion of a Go value into JSON.
 func MarshalEncode(out *jsontext.Encoder, in any, opts ...Options) (err error) {
-	mo := getStructOptions()
-	defer putStructOptions(mo)
-	mo.Join(opts...)
 	xe := export.Encoder(out)
-	mo.CopyCoderOptions(&xe.Struct)
-	return marshalEncode(out, in, mo)
+	if len(opts) > 0 {
+		optsOriginal := xe.Struct
+		defer func() { xe.Struct = optsOriginal }()
+		xe.Struct.JoinWithoutCoderOptions(opts...)
+	}
+	err = marshalEncode(out, in, &xe.Struct)
+	if err != nil && xe.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+		return internal.TransformMarshalError(in, err)
+	}
+	return err
 }
 
 func marshalEncode(out *jsontext.Encoder, in any, mo *jsonopts.Struct) (err error) {
@@ -202,12 +227,13 @@ func marshalEncode(out *jsontext.Encoder, in any, mo *jsonopts.Struct) (err erro
 	}
 	// Shallow copy non-pointer values to obtain an addressable value.
 	// It is beneficial to performance to always pass pointers to avoid this.
-	if v.Kind() != reflect.Pointer {
+	forceAddr := v.Kind() != reflect.Pointer
+	if forceAddr {
 		v2 := reflect.New(v.Type())
 		v2.Elem().Set(v)
 		v = v2
 	}
-	va := addressableValue{v.Elem()} // dereferenced pointer is always addressable
+	va := addressableValue{v.Elem(), forceAddr} // dereferenced pointer is always addressable
 	t := va.Type()
 
 	// Lookup and call the marshal function for this type.
@@ -216,9 +242,8 @@ func marshalEncode(out *jsontext.Encoder, in any, mo *jsonopts.Struct) (err erro
 		marshal, _ = mo.Marshalers.(*Marshalers).lookup(marshal, t)
 	}
 	if err := marshal(out, va, mo); err != nil {
-		xe := export.Encoder(out)
-		if !xe.Flags.Get(jsonflags.AllowDuplicateNames) {
-			xe.Tokens.InvalidateDisabledNamespaces()
+		if !mo.Flags.Get(jsonflags.AllowDuplicateNames) {
+			export.Encoder(out).Tokens.InvalidateDisabledNamespaces()
 		}
 		return err
 	}
@@ -245,10 +270,10 @@ func marshalEncode(out *jsontext.Encoder, in any, mo *jsonopts.Struct) (err erro
 //     value. If all applicable functions return [SkipFunc],
 //     then the input is decoded according to subsequent rules.
 //
-//   - If the value type implements [UnmarshalerV2],
-//     then the UnmarshalJSONV2 method is called to decode the JSON value.
+//   - If the value type implements [UnmarshalerFrom],
+//     then the UnmarshalJSONFrom method is called to decode the JSON value.
 //
-//   - If the value type implements [UnmarshalerV1],
+//   - If the value type implements [Unmarshaler],
 //     then the UnmarshalJSON method is called to decode the JSON value.
 //
 //   - If the value type implements [encoding.TextUnmarshaler],
@@ -293,26 +318,24 @@ func marshalEncode(out *jsontext.Encoder, in any, mo *jsonopts.Struct) (err erro
 //     otherwise it fails with a [SemanticError].
 //
 //   - A Go integer is decoded from a JSON number.
-//     It may also be decoded from a JSON string containing a JSON number
-//     if [StringifyNumbers] is specified.
+//     It must be decoded from a JSON string containing a JSON number
+//     if [StringifyNumbers] is specified or decoding a JSON object name.
 //     It fails with a [SemanticError] if the JSON number
 //     has a fractional or exponent component.
 //     It also fails if it overflows the representation of the Go integer type.
 //     It does not support any custom format flags.
 //
 //   - A Go float is decoded from a JSON number.
-//     It may also be decoded from a JSON string containing a JSON number
-//     if [StringifyNumbers] is specified.
-//     The JSON number is parsed as the closest representable Go float value.
+//     It must be decoded from a JSON string containing a JSON number
+//     if [StringifyNumbers] is specified or decoding a JSON object name.
+//     It fails if it overflows the representation of the Go float type.
 //     If the format is "nonfinite", then the JSON strings
 //     "NaN", "Infinity", and "-Infinity" are decoded as NaN, +Inf, and -Inf.
 //     Otherwise, the presence of such strings results in a [SemanticError].
 //
 //   - A Go map is decoded from a JSON object,
 //     where each JSON object name and value pair is recursively decoded
-//     as the Go map key and value. When decoding keys,
-//     [StringifyNumbers] is automatically applied so that
-//     numeric keys can decode from JSON strings. Maps are not cleared.
+//     as the Go map key and value. Maps are not cleared.
 //     If the Go map is nil, then a new map is allocated to decode into.
 //     If the decoded key matches an existing Go map entry, the entry value
 //     is reused by decoding the JSON object value into it.
@@ -358,19 +381,21 @@ func marshalEncode(out *jsontext.Encoder, in any, mo *jsonopts.Struct) (err erro
 //     If the format matches one of the format constants declared in
 //     the time package (e.g., RFC1123), then that format is used for parsing.
 //     If the format is "unix", "unixmilli", "unixmicro", or "unixnano",
-//     then the timestamp is decoded from a JSON number of the number of seconds
-//     (or milliseconds, microseconds, or nanoseconds) since the Unix epoch,
-//     which is January 1st, 1970 at 00:00:00 UTC.
+//     then the timestamp is decoded from an optionally fractional JSON number
+//     of the number of seconds (or milliseconds, microseconds, or nanoseconds)
+//     since the Unix epoch, which is January 1st, 1970 at 00:00:00 UTC.
 //     Otherwise, the format is used as-is with [time.Time.Parse] if non-empty.
 //
-//   - A Go [time.Duration] is decoded from a JSON string by
-//     passing the decoded string to [time.ParseDuration].
+//   - A Go [time.Duration] currently has no default representation and
+//     requires an explicit format to be specified.
 //     If the format is "sec", "milli", "micro", or "nano",
-//     then the duration is decoded from a JSON number of the number of seconds
-//     (or milliseconds, microseconds, or nanoseconds) in the duration.
-//     If the format is "base60", it is decoded from a JSON string
-//     using the "H:MM:SS.SSSSSSSSS" representation.
-//     If the format is "units", it uses [time.ParseDuration].
+//     then the duration is decoded from an optionally fractional JSON number
+//     of the number of seconds (or milliseconds, microseconds, or nanoseconds).
+//     If the format is "units", it is decoded from a JSON string parsed using
+//     [time.ParseDuration] (e.g., "1h30m" for 1 hour 30 minutes).
+//     If the format is "iso8601", it is decoded from a JSON string using the
+//     ISO 8601 standard for durations (e.g., "PT1H30M" for 1 hour 30 minutes)
+//     accepting only accurate units of hours, minutes, or seconds.
 //
 //   - All other Go types (e.g., complex numbers, channels, and functions)
 //     have no default representation and result in a [SemanticError].
@@ -384,7 +409,11 @@ func Unmarshal(in []byte, out any, opts ...Options) (err error) {
 	dec := export.GetBufferedDecoder(in, opts...)
 	defer export.PutBufferedDecoder(dec)
 	xd := export.Decoder(dec)
-	return unmarshalFull(dec, out, &xd.Struct)
+	err = unmarshalDecode(dec, out, &xd.Struct, true)
+	if err != nil && xd.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+		return internal.TransformUnmarshalError(out, err)
+	}
+	return err
 }
 
 // UnmarshalRead deserializes a Go value from an [io.Reader] according to the
@@ -397,52 +426,57 @@ func UnmarshalRead(in io.Reader, out any, opts ...Options) (err error) {
 	dec := export.GetStreamingDecoder(in, opts...)
 	defer export.PutStreamingDecoder(dec)
 	xd := export.Decoder(dec)
-	return unmarshalFull(dec, out, &xd.Struct)
-}
-
-func unmarshalFull(in *jsontext.Decoder, out any, uo *jsonopts.Struct) error {
-	switch err := unmarshalDecode(in, out, uo); err {
-	case nil:
-		return export.Decoder(in).CheckEOF()
-	case io.EOF:
-		return io.ErrUnexpectedEOF
-	default:
-		return err
+	err = unmarshalDecode(dec, out, &xd.Struct, true)
+	if err != nil && xd.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+		return internal.TransformUnmarshalError(out, err)
 	}
+	return err
 }
 
 // UnmarshalDecode deserializes a Go value from a [jsontext.Decoder] according to
 // the provided unmarshal options (while ignoring marshal, encode, or decode options).
+// Any unmarshal options already specified on the [jsontext.Decoder]
+// take lower precedence than the set of options provided by the caller.
 // Unlike [Unmarshal] and [UnmarshalRead], decode options are ignored because
 // they must have already been specified on the provided [jsontext.Decoder].
+//
 // The input may be a stream of one or more JSON values,
 // where this only unmarshals the next JSON value in the stream.
 // The output must be a non-nil pointer.
 // See [Unmarshal] for details about the conversion of JSON into a Go value.
 func UnmarshalDecode(in *jsontext.Decoder, out any, opts ...Options) (err error) {
-	uo := getStructOptions()
-	defer putStructOptions(uo)
-	uo.Join(opts...)
 	xd := export.Decoder(in)
-	uo.CopyCoderOptions(&xd.Struct)
-	return unmarshalDecode(in, out, uo)
+	if len(opts) > 0 {
+		optsOriginal := xd.Struct
+		defer func() { xd.Struct = optsOriginal }()
+		xd.Struct.JoinWithoutCoderOptions(opts...)
+	}
+	err = unmarshalDecode(in, out, &xd.Struct, false)
+	if err != nil && xd.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+		return internal.TransformUnmarshalError(out, err)
+	}
+	return err
 }
 
-func unmarshalDecode(in *jsontext.Decoder, out any, uo *jsonopts.Struct) (err error) {
+func unmarshalDecode(in *jsontext.Decoder, out any, uo *jsonopts.Struct, last bool) (err error) {
 	v := reflect.ValueOf(out)
-	if !v.IsValid() || v.Kind() != reflect.Pointer || v.IsNil() {
-		var t reflect.Type
-		if v.IsValid() {
-			t = v.Type()
-			if t.Kind() == reflect.Pointer {
-				t = t.Elem()
-			}
-		}
-		err := errors.New("value must be passed as a non-nil pointer reference")
-		return &SemanticError{action: "unmarshal", GoType: t, Err: err}
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return &SemanticError{action: "unmarshal", GoType: reflect.TypeOf(out), Err: internal.ErrNonNilReference}
 	}
-	va := addressableValue{v.Elem()} // dereferenced pointer is always addressable
+	va := addressableValue{v.Elem(), false} // dereferenced pointer is always addressable
 	t := va.Type()
+
+	// In legacy semantics, the entirety of the next JSON value
+	// was validated before attempting to unmarshal it.
+	if uo.Flags.Get(jsonflags.ReportErrorsWithLegacySemantics) {
+		if err := export.Decoder(in).CheckNextValue(last); err != nil {
+			if err == io.EOF && last {
+				offset := in.InputOffset() + int64(len(in.UnreadBuffer()))
+				return &jsontext.SyntacticError{ByteOffset: offset, Err: io.ErrUnexpectedEOF}
+			}
+			return err
+		}
+	}
 
 	// Lookup and call the unmarshal function for this type.
 	unmarshal := lookupArshaler(t).unmarshal
@@ -450,11 +484,17 @@ func unmarshalDecode(in *jsontext.Decoder, out any, uo *jsonopts.Struct) (err er
 		unmarshal, _ = uo.Unmarshalers.(*Unmarshalers).lookup(unmarshal, t)
 	}
 	if err := unmarshal(in, va, uo); err != nil {
-		xd := export.Decoder(in)
-		if !xd.Flags.Get(jsonflags.AllowDuplicateNames) {
-			xd.Tokens.InvalidateDisabledNamespaces()
+		if !uo.Flags.Get(jsonflags.AllowDuplicateNames) {
+			export.Decoder(in).Tokens.InvalidateDisabledNamespaces()
+		}
+		if err == io.EOF && last {
+			offset := in.InputOffset() + int64(len(in.UnreadBuffer()))
+			return &jsontext.SyntacticError{ByteOffset: offset, Err: io.ErrUnexpectedEOF}
 		}
 		return err
+	}
+	if last {
+		return export.Decoder(in).CheckEOF()
 	}
 	return nil
 }
@@ -465,12 +505,22 @@ func unmarshalDecode(in *jsontext.Decoder, out any, uo *jsonopts.Struct) (err er
 // There is no compile magic that enforces this property,
 // but rather the need to construct this type makes it easier to examine each
 // construction site to ensure that this property is upheld.
-type addressableValue struct{ reflect.Value }
+type addressableValue struct {
+	reflect.Value
+
+	// forcedAddr reports whether this value is addressable
+	// only through the use of [newAddressableValue].
+	// This is only used for [jsonflags.CallMethodsWithLegacySemantics].
+	forcedAddr bool
+}
 
 // newAddressableValue constructs a new addressable value of type t.
 func newAddressableValue(t reflect.Type) addressableValue {
-	return addressableValue{reflect.New(t).Elem()}
+	return addressableValue{reflect.New(t).Elem(), true}
 }
+
+// TODO: Remove *jsonopts.Struct argument from [marshaler] and [unmarshaler].
+// This can be directly accessed on the encoder or decoder.
 
 // All marshal and unmarshal behavior is implemented using these signatures.
 // The *jsonopts.Struct argument is guaranteed to identical to or at least
@@ -525,7 +575,6 @@ func putStrings(s *stringSlice) {
 	stringsPools.Put(s)
 }
 
-// Sort sorts the string slice according to RFC 8785, section 3.2.3.
 func (ss *stringSlice) Sort() {
-	slices.SortFunc(*ss, func(x, y string) int { return jsonwire.CompareUTF16(x, y) })
+	slices.SortFunc(*ss, func(x, y string) int { return strings.Compare(x, y) })
 }

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package drive provides a filesystem that allows sharing folders between
@@ -17,7 +17,7 @@ import (
 // Remote represents a remote Taildrive node.
 type Remote struct {
 	Name      string
-	URL       string
+	URL       func() string
 	Available func() bool
 }
 

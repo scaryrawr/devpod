@@ -16,7 +16,16 @@ type Feature struct {
 	// +optional
 	Preview bool `json:"preview,omitempty"`
 
+	// AllowBefore is an optional timestamp. If set, licenses issued before this time are allowed
+	// to use the feature even if it's not included in the license.
+	// +optional
+	AllowBefore string `json:"allowBefore,omitempty"`
+
 	// Status shows the status of the feature (see type FeatureStatus)
 	// +optional
 	Status string `json:"status,omitempty"`
+
+	// Name of the module that this feature belongs to
+	// +optional
+	Module string `json:"module,omitempty"`
 }

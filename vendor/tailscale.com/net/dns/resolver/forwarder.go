@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package resolver
@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -26,13 +27,17 @@ import (
 	dns "golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/control/controlknobs"
 	"tailscale.com/envknob"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/health"
 	"tailscale.com/net/dns/publicdns"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/neterror"
 	"tailscale.com/net/netmon"
+	"tailscale.com/net/netx"
 	"tailscale.com/net/sockstats"
 	"tailscale.com/net/tsdial"
+	"tailscale.com/syncs"
 	"tailscale.com/types/dnstype"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/nettype"
@@ -56,6 +61,17 @@ func truncatedFlagSet(pkt []byte) bool {
 		return false
 	}
 	return (binary.BigEndian.Uint16(pkt[2:4]) & dnsFlagTruncated) != 0
+}
+
+// setTCFlag sets the TC (truncated) flag in the DNS packet header.
+// The packet must be at least headerBytes in length.
+func setTCFlag(packet []byte) {
+	if len(packet) < headerBytes {
+		return
+	}
+	flags := binary.BigEndian.Uint16(packet[2:4])
+	flags |= dnsFlagTruncated
+	binary.BigEndian.PutUint16(packet[2:4], flags)
 }
 
 const (
@@ -126,47 +142,59 @@ func getRCode(packet []byte) dns.RCode {
 	return dns.RCode(packet[3] & 0x0F)
 }
 
+// findOPTRecord finds and validates the EDNS OPT record at the end of a DNS packet.
+// Returns the requested buffer size and a pointer to the OPT record bytes if valid,
+// or (0, nil) if no valid OPT record is found.
+// The OPT record must be at the very end of the packet with no option codes.
+func findOPTRecord(packet []byte) (requestedSize uint16, opt []byte) {
+	const optFixedBytes = 11 // size of an OPT record with no option codes
+	const edns0Version = 0   // EDNS version number (currently only version 0 is defined)
+
+	if len(packet) < headerBytes+optFixedBytes {
+		return 0, nil
+	}
+
+	arCount := binary.BigEndian.Uint16(packet[10:12])
+	if arCount == 0 {
+		// OPT shows up in an AR, so there must be no OPT
+		return 0, nil
+	}
+
+	// https://datatracker.ietf.org/doc/html/rfc6891#section-6.1.2
+	opt = packet[len(packet)-optFixedBytes:]
+
+	if opt[0] != 0 {
+		// OPT NAME must be 0 (root domain)
+		return 0, nil
+	}
+	if dns.Type(binary.BigEndian.Uint16(opt[1:3])) != dns.TypeOPT {
+		// Not an OPT record
+		return 0, nil
+	}
+	requestedSize = binary.BigEndian.Uint16(opt[3:5])
+	// Ignore extended RCODE in opt[5]
+	if opt[6] != edns0Version {
+		// Be conservative and don't touch unknown versions.
+		return 0, nil
+	}
+	// Ignore flags in opt[6:9]
+	if binary.BigEndian.Uint16(opt[9:11]) != 0 {
+		// RDLEN must be 0 (no variable length data). We're at the end of the
+		// packet so this should be 0 anyway.
+		return 0, nil
+	}
+
+	return requestedSize, opt
+}
+
 // clampEDNSSize attempts to limit the maximum EDNS response size. This is not
 // an exhaustive solution, instead only easy cases are currently handled in the
 // interest of speed and reduced complexity. Only OPT records at the very end of
 // the message with no option codes are addressed.
 // TODO: handle more situations if we discover that they happen often
 func clampEDNSSize(packet []byte, maxSize uint16) {
-	// optFixedBytes is the size of an OPT record with no option codes.
-	const optFixedBytes = 11
-	const edns0Version = 0
-
-	if len(packet) < headerBytes+optFixedBytes {
-		return
-	}
-
-	arCount := binary.BigEndian.Uint16(packet[10:12])
-	if arCount == 0 {
-		// OPT shows up in an AR, so there must be no OPT
-		return
-	}
-
-	// https://datatracker.ietf.org/doc/html/rfc6891#section-6.1.2
-	opt := packet[len(packet)-optFixedBytes:]
-
-	if opt[0] != 0 {
-		// OPT NAME must be 0 (root domain)
-		return
-	}
-	if dns.Type(binary.BigEndian.Uint16(opt[1:3])) != dns.TypeOPT {
-		// Not an OPT record
-		return
-	}
-	requestedSize := binary.BigEndian.Uint16(opt[3:5])
-	// Ignore extended RCODE in opt[5]
-	if opt[6] != edns0Version {
-		// Be conservative and don't touch unknown versions.
-		return
-	}
-	// Ignore flags in opt[6:9]
-	if binary.BigEndian.Uint16(opt[9:11]) != 0 {
-		// RDLEN must be 0 (no variable length data). We're at the end of the
-		// packet so this should be 0 anyway)..
+	requestedSize, opt := findOPTRecord(packet)
+	if opt == nil {
 		return
 	}
 
@@ -176,6 +204,57 @@ func clampEDNSSize(packet []byte, maxSize uint16) {
 
 	// Clamp the maximum size
 	binary.BigEndian.PutUint16(opt[3:5], maxSize)
+}
+
+// getEDNSBufferSize extracts the EDNS buffer size from a DNS request packet.
+// Returns (bufferSize, true) if a valid EDNS OPT record is found,
+// or (0, false) if no EDNS OPT record is found or if there's an error.
+func getEDNSBufferSize(packet []byte) (uint16, bool) {
+	requestedSize, opt := findOPTRecord(packet)
+	return requestedSize, opt != nil
+}
+
+// checkResponseSizeAndSetTC sets the TC (truncated) flag in the DNS header when
+// the response exceeds the maximum UDP size. If no EDNS OPT record is present
+// in the request, it sets the TC flag when the response is bigger than 512 bytes
+// per RFC 1035. If an EDNS OPT record is present, it sets the TC flag when the
+// response is bigger than the EDNS buffer size. The response buffer is not
+// truncated; only the TC flag is set. Returns the response unchanged except for
+// the TC flag being set if needed.
+func checkResponseSizeAndSetTC(response []byte, request []byte, family string, logf logger.Logf) []byte {
+	const defaultUDPSize = 512 // default maximum UDP DNS packet size per RFC 1035
+
+	// Only check for UDP queries; TCP can handle larger responses
+	if family != "udp" {
+		return response
+	}
+
+	// Check if TC flag is already set
+	if len(response) < headerBytes {
+		return response
+	}
+	if truncatedFlagSet(response) {
+		// TC flag already set, nothing to do
+		return response
+	}
+
+	ednsSize, hasEDNS := getEDNSBufferSize(request)
+
+	// Determine maximum allowed size
+	var maxSize int
+	if hasEDNS {
+		maxSize = int(ednsSize)
+	} else {
+		// No EDNS: enforce default UDP size limit per RFC 1035
+		maxSize = defaultUDPSize
+	}
+
+	// Check if response exceeds maximum size
+	if len(response) > maxSize {
+		setTCFlag(response)
+	}
+
+	return response
 }
 
 // dnsForwarderFailing should be raised when the forwarder is unable to reach the
@@ -215,18 +294,19 @@ type resolverAndDelay struct {
 
 // forwarder forwards DNS packets to a number of upstream nameservers.
 type forwarder struct {
-	logf    logger.Logf
-	netMon  *netmon.Monitor     // always non-nil
-	linkSel ForwardLinkSelector // TODO(bradfitz): remove this when tsdial.Dialer absorbs it
-	dialer  *tsdial.Dialer
-	health  *health.Tracker // always non-nil
+	logf       logger.Logf
+	netMon     *netmon.Monitor     // always non-nil
+	linkSel    ForwardLinkSelector // TODO(bradfitz): remove this when tsdial.Dialer absorbs it
+	dialer     *tsdial.Dialer
+	health     *health.Tracker // always non-nil
+	verboseFwd bool            // if true, log all DNS forwarding
 
 	controlKnobs *controlknobs.Knobs // or nil
 
 	ctx       context.Context    // good until Close
 	ctxCancel context.CancelFunc // closes ctx
 
-	mu sync.Mutex // guards following
+	mu syncs.Mutex // guards following
 
 	dohClient map[string]*http.Client // urlBase -> client
 
@@ -244,25 +324,28 @@ type forwarder struct {
 	// resolver lookup.
 	cloudHostFallback []resolverAndDelay
 
-	// missingUpstreamRecovery, if non-nil, is set called when a SERVFAIL is
-	// returned due to missing upstream resolvers.
-	//
-	// This should attempt to properly (re)set the upstream resolvers.
-	missingUpstreamRecovery func()
+	// acceptDNS tracks the CorpDNS pref (--accept-dns)
+	// This lets us skip health warnings if the forwarder receives inbound
+	// queries directly - but we didn't configure it with any upstream resolvers.
+	// That's an error, but not a health error if the user has disabled CorpDNS.
+	acceptDNS bool
 }
 
 func newForwarder(logf logger.Logf, netMon *netmon.Monitor, linkSel ForwardLinkSelector, dialer *tsdial.Dialer, health *health.Tracker, knobs *controlknobs.Knobs) *forwarder {
+	if !buildfeatures.HasDNS {
+		return nil
+	}
 	if netMon == nil {
 		panic("nil netMon")
 	}
 	f := &forwarder{
-		logf:                    logger.WithPrefix(logf, "forward: "),
-		netMon:                  netMon,
-		linkSel:                 linkSel,
-		dialer:                  dialer,
-		health:                  health,
-		controlKnobs:            knobs,
-		missingUpstreamRecovery: func() {},
+		logf:         logger.WithPrefix(logf, "forward: "),
+		netMon:       netMon,
+		linkSel:      linkSel,
+		dialer:       dialer,
+		health:       health,
+		controlKnobs: knobs,
+		verboseFwd:   verboseDNSForward(),
 	}
 	f.ctx, f.ctxCancel = context.WithCancel(context.Background())
 	return f
@@ -357,7 +440,7 @@ func cloudResolvers() []resolverAndDelay {
 // Resolver.SetConfig on reconfig.
 //
 // The memory referenced by routesBySuffix should not be modified.
-func (f *forwarder) setRoutes(routesBySuffix map[dnsname.FQDN][]*dnstype.Resolver) {
+func (f *forwarder) setRoutes(routesBySuffix map[dnsname.FQDN][]*dnstype.Resolver, acceptDNS bool) {
 	routes := make([]route, 0, len(routesBySuffix))
 
 	cloudHostFallback := cloudResolvers()
@@ -391,6 +474,7 @@ func (f *forwarder) setRoutes(routesBySuffix map[dnsname.FQDN][]*dnstype.Resolve
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.acceptDNS = acceptDNS
 	f.routes = routes
 	f.cloudHostFallback = cloudHostFallback
 }
@@ -520,16 +604,25 @@ var (
 //
 // send expects the reply to have the same txid as txidOut.
 func (f *forwarder) send(ctx context.Context, fq *forwardQuery, rr resolverAndDelay) (ret []byte, err error) {
-	if verboseDNSForward() {
+	if f.verboseFwd {
 		id := forwarderCount.Add(1)
 		domain, typ, _ := nameFromQuery(fq.packet)
-		f.logf("forwarder.send(%q, %d, %v, %d) [%d] ...", rr.name.Addr, fq.txid, typ, len(domain), id)
+		f.logf("forwarder.send(%q, %d, %v, %d) from %v [%d] ...", rr.name.Addr, fq.txid, typ, len(domain), fq.src, id)
 		defer func() {
-			f.logf("forwarder.send(%q, %d, %v, %d) [%d] = %v, %v", rr.name.Addr, fq.txid, typ, len(domain), id, len(ret), err)
+			f.logf("forwarder.send(%q, %d, %v, %d) from %v [%d] = %v, %v", rr.name.Addr, fq.txid, typ, len(domain), fq.src, id, len(ret), err)
 		}()
 	}
 	if strings.HasPrefix(rr.name.Addr, "http://") {
-		return f.sendDoH(ctx, rr.name.Addr, f.dialer.PeerAPIHTTPClient(), fq.packet)
+		if !buildfeatures.HasPeerAPIClient {
+			return nil, feature.ErrUnavailable
+		}
+		res, err := f.sendDoH(ctx, rr.name.Addr, f.dialer.PeerAPIHTTPClient(), fq.packet)
+		if err != nil {
+			return nil, err
+		}
+		// Check response size and set TC flag if needed (only for UDP queries)
+		res = checkResponseSizeAndSetTC(res, fq.packet, fq.family, f.logf)
+		return res, nil
 	}
 	if strings.HasPrefix(rr.name.Addr, "https://") {
 		// Only known DoH providers are supported currently. Specifically, we
@@ -540,7 +633,13 @@ func (f *forwarder) send(ctx context.Context, fq *forwardQuery, rr resolverAndDe
 		// them.
 		urlBase := rr.name.Addr
 		if hc, ok := f.getKnownDoHClientForProvider(urlBase); ok {
-			return f.sendDoH(ctx, urlBase, hc, fq.packet)
+			res, err := f.sendDoH(ctx, urlBase, hc, fq.packet)
+			if err != nil {
+				return nil, err
+			}
+			// Check response size and set TC flag if needed (only for UDP queries)
+			res = checkResponseSizeAndSetTC(res, fq.packet, fq.family, f.logf)
+			return res, nil
 		}
 		metricDNSFwdErrorType.Add(1)
 		return nil, fmt.Errorf("arbitrary https:// resolvers not supported yet")
@@ -704,12 +803,15 @@ func (f *forwarder) sendUDP(ctx context.Context, fq *forwardQuery, rr resolverAn
 		f.logf("recv: packet too small (%d bytes)", n)
 	}
 	out = out[:n]
+	tcFlagAlreadySet := truncatedFlagSet(out)
+
 	txid := getTxID(out)
 	if txid != fq.txid {
 		metricDNSFwdUDPErrorTxID.Add(1)
 		return nil, errTxIDMismatch
 	}
 	rcode := getRCode(out)
+
 	// don't forward transient errors back to the client when the server fails
 	if rcode == dns.RCodeServerFailure {
 		f.logf("recv: response code indicating server failure: %d", rcode)
@@ -717,11 +819,9 @@ func (f *forwarder) sendUDP(ctx context.Context, fq *forwardQuery, rr resolverAn
 		return nil, errServerFailure
 	}
 
-	if truncated {
-		// Set the truncated bit if it wasn't already.
-		flags := binary.BigEndian.Uint16(out[2:4])
-		flags |= dnsFlagTruncated
-		binary.BigEndian.PutUint16(out[2:4], flags)
+	// Set the truncated bit if buffer was truncated during read and the flag isn't already set
+	if truncated && !tcFlagAlreadySet {
+		setTCFlag(out)
 
 		// TODO(#2067): Remove any incomplete records? RFC 1035 section 6.2
 		// states that truncation should head drop so that the authority
@@ -729,6 +829,8 @@ func (f *forwarder) sendUDP(ctx context.Context, fq *forwardQuery, rr resolverAn
 		// a too-small buffer has already dropped the end, so that's the
 		// best we can do.
 	}
+
+	out = checkResponseSizeAndSetTC(out, fq.packet, fq.family, f.logf)
 
 	if truncatedFlagSet(out) {
 		metricDNSFwdTruncated.Add(1)
@@ -739,18 +841,38 @@ func (f *forwarder) sendUDP(ctx context.Context, fq *forwardQuery, rr resolverAn
 	return out, nil
 }
 
-func (f *forwarder) getDialerType() dnscache.DialContextFunc {
-	if f.controlKnobs != nil && f.controlKnobs.UserDialUseRoutes.Load() {
-		// It is safe to use UserDial as it dials external servers without going through Tailscale
-		// and closes connections on interface change in the same way as SystemDial does,
-		// thus preventing DNS resolution issues when switching between WiFi and cellular,
-		// but can also dial an internal DNS server on the Tailnet or via a subnet router.
-		//
-		// TODO(nickkhyl): Update tsdial.Dialer to reuse the bart.Table we create in net/tstun.Wrapper
-		// to avoid having two bart tables in memory, especially on iOS. Once that's done,
-		// we can get rid of the nodeAttr/control knob and always use UserDial for DNS.
-		//
-		// See https://github.com/tailscale/tailscale/issues/12027.
+var optDNSForwardUseRoutes = envknob.RegisterOptBool("TS_DEBUG_DNS_FORWARD_USE_ROUTES")
+
+// ShouldUseRoutes reports whether the DNS resolver should consider routes when dialing
+// upstream nameservers via TCP.
+//
+// If true, routes should be considered ([tsdial.Dialer.UserDial]), otherwise defer
+// to the system routes ([tsdial.Dialer.SystemDial]).
+//
+// TODO(nickkhyl): Update [tsdial.Dialer] to reuse the bart.Table we create in net/tstun.Wrapper
+// to avoid having two bart tables in memory, especially on iOS. Once that's done,
+// we can get rid of the nodeAttr/control knob and always use UserDial for DNS.
+//
+// See tailscale/tailscale#12027.
+func ShouldUseRoutes(knobs *controlknobs.Knobs) bool {
+	if !buildfeatures.HasDNS {
+		return false
+	}
+	switch runtime.GOOS {
+	case "android", "ios":
+		// On mobile platforms with lower memory limits (e.g., 50MB on iOS),
+		// this behavior is still gated by the "user-dial-routes" nodeAttr.
+		return knobs != nil && knobs.UserDialUseRoutes.Load()
+	default:
+		// On all other platforms, it is the default behavior,
+		// but it can be overridden with the "TS_DEBUG_DNS_FORWARD_USE_ROUTES" env var.
+		doNotUseRoutes := optDNSForwardUseRoutes().EqualBool(false)
+		return !doNotUseRoutes
+	}
+}
+
+func (f *forwarder) getDialerType() netx.DialFunc {
+	if ShouldUseRoutes(f.controlKnobs) {
 		return f.dialer.UserDial
 	}
 	return f.dialer.SystemDial
@@ -878,6 +1000,7 @@ type forwardQuery struct {
 	txid   txid
 	packet []byte
 	family string // "tcp" or "udp"
+	src    netip.AddrPort
 
 	// closeOnCtxDone lets send register values to Close if the
 	// caller's ctx expires. This avoids send from allocating its
@@ -940,15 +1063,10 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 		resolvers = f.resolvers(domain)
 		if len(resolvers) == 0 {
 			metricDNSFwdErrorNoUpstream.Add(1)
-			f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: ""})
-			f.logf("no upstream resolvers set, returning SERVFAIL")
-
-			// Attempt to recompile the DNS configuration
-			// If we are being asked to forward queries and we have no
-			// nameservers, the network is in a bad state.
-			if f.missingUpstreamRecovery != nil {
-				f.missingUpstreamRecovery()
+			if f.acceptDNS {
+				f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: ""})
 			}
+			f.logf("no upstream resolvers set, returning SERVFAIL")
 
 			res, err := servfailResponse(query)
 			if err != nil {
@@ -969,11 +1087,12 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 		txid:           getTxID(query.bs),
 		packet:         query.bs,
 		family:         query.family,
+		src:            query.addr,
 		closeOnCtxDone: new(closePool),
 	}
 	defer fq.closeOnCtxDone.Close()
 
-	if verboseDNSForward() {
+	if f.verboseFwd {
 		domainSha256 := sha256.Sum256([]byte(domain))
 		domainSig := base64.RawStdEncoding.EncodeToString(domainSha256[:3])
 		f.logf("request(%d, %v, %d, %s) %d...", fq.txid, typ, len(domain), domainSig, len(fq.packet))
@@ -1018,7 +1137,7 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 				metricDNSFwdErrorContext.Add(1)
 				return fmt.Errorf("waiting to send response: %w", ctx.Err())
 			case responseChan <- packet{v, query.family, query.addr}:
-				if verboseDNSForward() {
+				if f.verboseFwd {
 					f.logf("response(%d, %v, %d) = %d, nil", fq.txid, typ, len(domain), len(v))
 				}
 				metricDNSFwdSuccess.Add(1)
@@ -1046,9 +1165,11 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 						for _, rr := range resolvers {
 							resolverAddrs = append(resolverAddrs, rr.name.Addr)
 						}
-						f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: strings.Join(resolverAddrs, ",")})
+						if f.acceptDNS {
+							f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: strings.Join(resolverAddrs, ",")})
+						}
 					case responseChan <- res:
-						if verboseDNSForward() {
+						if f.verboseFwd {
 							f.logf("forwarder response(%d, %v, %d) = %d, %v", fq.txid, typ, len(domain), len(res.bs), firstErr)
 						}
 						return nil
@@ -1071,7 +1192,9 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 			for _, rr := range resolvers {
 				resolverAddrs = append(resolverAddrs, rr.name.Addr)
 			}
-			f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: strings.Join(resolverAddrs, ",")})
+			if f.acceptDNS {
+				f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: strings.Join(resolverAddrs, ",")})
+			}
 			return fmt.Errorf("waiting for response or error from %v: %w", resolverAddrs, ctx.Err())
 		}
 	}

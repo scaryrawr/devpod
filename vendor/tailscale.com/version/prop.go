@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package version
@@ -9,9 +9,26 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/lazy"
+)
+
+// AppIdentifierFn, if non-nil, is a callback function that returns the
+// application identifier of the running process or an empty string if unknown.
+//
+// tailscale(d) implementations can set an explicit callback to return an identifier
+// for the running process if such a concept exists.  The Apple bundle identifier, for example.
+var AppIdentifierFn func() string // or nil
+
+const (
+	macsysBundleID      = "io.tailscale.ipn.macsys"                     // The macsys gui app and CLI
+	appStoreBundleID    = "io.tailscale.ipn.macos"                      // The App Store gui app and CLI
+	macsysExtBundleId   = "io.tailscale.ipn.macsys.network-extension"   // The macsys system extension
+	appStoreExtBundleId = "io.tailscale.ipn.macos.network-extension"    // The App Store network extension
+	tvOSExtBundleId     = "io.tailscale.ipn.ios.network-extension-tvos" // The tvOS network extension
+	iOSExtBundleId      = "io.tailscale.ipn.ios.network-extension"      // The iOS network extension
 )
 
 // IsMobile reports whether this is a mobile client build.
@@ -51,8 +68,8 @@ func IsMacGUIVariant() bool {
 
 // IsSandboxedMacOS reports whether this process is a sandboxed macOS
 // process (either the app or the extension). It is true for the Mac App Store
-// and macsys (System Extension) version on macOS, and false for
-// tailscaled-on-macOS.
+// and macsys (only its System Extension) variants on macOS, and false for
+// tailscaled and the macsys GUI process on macOS.
 func IsSandboxedMacOS() bool {
 	return IsMacAppStore() || IsMacSysExt()
 }
@@ -61,26 +78,26 @@ func IsSandboxedMacOS() bool {
 // Tailscale for macOS, either the main GUI process (non-sandboxed) or the
 // system extension (sandboxed).
 func IsMacSys() bool {
-	return IsMacSysExt() || IsMacSysApp()
+	return IsMacSysExt() || IsMacSysGUI()
 }
 
 var isMacSysApp lazy.SyncValue[bool]
 
-// IsMacSysApp reports whether this process is the main, non-sandboxed GUI process
+// IsMacSysGUI reports whether this process is the main, non-sandboxed GUI process
 // that ships with the Standalone variant of Tailscale for macOS.
-func IsMacSysApp() bool {
+func IsMacSysGUI() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-
 	return isMacSysApp.Get(func() bool {
-		exe, err := os.Executable()
-		if err != nil {
-			return false
+		if AppIdentifierFn != nil {
+			return AppIdentifierFn() == macsysBundleID
 		}
-		// Check that this is the GUI binary, and it is not sandboxed. The GUI binary
-		// shipped in the App Store will always have the App Sandbox enabled.
-		return strings.HasSuffix(exe, "/Contents/MacOS/Tailscale") && !IsMacAppStore()
+
+		// TODO (barnstar): This check should be redundant once all relevant callers
+		// use AppIdentifierFn.
+		return strings.Contains(os.Getenv("HOME"), "/Containers/io.tailscale.ipn.macsys/") ||
+			strings.Contains(os.Getenv("XPC_SERVICE_NAME"), macsysBundleID)
 	})
 }
 
@@ -94,32 +111,64 @@ func IsMacSysExt() bool {
 		return false
 	}
 	return isMacSysExt.Get(func() bool {
-		if strings.Contains(os.Getenv("HOME"), "/Containers/io.tailscale.ipn.macsys/") ||
-			strings.Contains(os.Getenv("XPC_SERVICE_NAME"), "io.tailscale.ipn.macsys") {
-			return true
+		if AppIdentifierFn != nil {
+			return AppIdentifierFn() == macsysExtBundleId
 		}
+
+		// TODO (barnstar): This check should be redundant once all relevant callers
+		// use AppIdentifierFn.
 		exe, err := os.Executable()
 		if err != nil {
 			return false
 		}
-		return filepath.Base(exe) == "io.tailscale.ipn.macsys.network-extension"
+		return filepath.Base(exe) == macsysExtBundleId
 	})
 }
 
 var isMacAppStore lazy.SyncValue[bool]
 
-// IsMacAppStore whether this binary is from the App Store version of Tailscale
-// for macOS.
+// IsMacAppStore returns whether this binary is from the App Store version of Tailscale
+// for macOS.  Returns true for both the network extension and the GUI app.
 func IsMacAppStore() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
 	return isMacAppStore.Get(func() bool {
+		if AppIdentifierFn != nil {
+			id := AppIdentifierFn()
+			return id == appStoreBundleID || id == appStoreExtBundleId
+		}
+		// TODO (barnstar): This check should be redundant once all relevant callers
+		// use AppIdentifierFn.
 		// Both macsys and app store versions can run CLI executable with
 		// suffix /Contents/MacOS/Tailscale. Check $HOME to filter out running
 		// as macsys.
 		return strings.Contains(os.Getenv("HOME"), "/Containers/io.tailscale.ipn.macos/") ||
-			strings.Contains(os.Getenv("XPC_SERVICE_NAME"), "io.tailscale.ipn.macos")
+			strings.Contains(os.Getenv("XPC_SERVICE_NAME"), appStoreBundleID)
+	})
+}
+
+var isMacAppStoreGUI lazy.SyncValue[bool]
+
+// IsMacAppStoreGUI reports whether this binary is the GUI app from the App Store
+// version of Tailscale for macOS.
+func IsMacAppStoreGUI() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	return isMacAppStoreGUI.Get(func() bool {
+		if AppIdentifierFn != nil {
+			return AppIdentifierFn() == appStoreBundleID
+		}
+		// TODO (barnstar): This check should be redundant once all relevant callers
+		// use AppIdentifierFn.
+		exe, err := os.Executable()
+		if err != nil {
+			return false
+		}
+		// Check that this is the GUI binary, and it is not sandboxed. The GUI binary
+		// shipped in the App Store will always have the App Sandbox enabled.
+		return strings.Contains(exe, "/Tailscale") && !IsMacSysGUI()
 	})
 }
 
@@ -132,7 +181,13 @@ func IsAppleTV() bool {
 		return false
 	}
 	return isAppleTV.Get(func() bool {
-		return strings.EqualFold(os.Getenv("XPC_SERVICE_NAME"), "io.tailscale.ipn.ios.network-extension-tvos")
+		if AppIdentifierFn != nil {
+			return AppIdentifierFn() == tvOSExtBundleId
+		}
+
+		// TODO (barnstar): This check should be redundant once all relevant callers
+		// use AppIdentifierFn.
+		return strings.EqualFold(os.Getenv("XPC_SERVICE_NAME"), tvOSExtBundleId)
 	})
 }
 
@@ -148,7 +203,9 @@ func IsWindowsGUI() bool {
 		if err != nil {
 			return false
 		}
-		return strings.EqualFold(exe, "tailscale-ipn.exe") || strings.EqualFold(exe, "tailscale-ipn")
+		// It is okay to use GOARCH here because we're checking whether our
+		// _own_ process is the GUI.
+		return isGUIExeName(exe, runtime.GOARCH)
 	})
 }
 
@@ -174,7 +231,24 @@ func IsUnstableBuild() bool {
 	})
 }
 
-var isDev = lazy.SyncFunc(func() bool {
+// osVariant returns the OS variant string for systems where we support
+// multiple ways of running tailscale(d), if any.
+//
+// For example: "appstore", "macsys", "darwin".
+func osVariant() string {
+	if IsMacAppStore() {
+		return "appstore"
+	}
+	if IsMacSys() {
+		return "macsys"
+	}
+	if runtime.GOOS == "darwin" {
+		return "darwin"
+	}
+	return ""
+}
+
+var isDev = sync.OnceValue(func() bool {
 	return strings.Contains(Short(), "-dev")
 })
 
@@ -214,6 +288,11 @@ type Meta struct {
 	// setting "vcs.modified" was true).
 	GitDirty bool `json:"gitDirty,omitempty"`
 
+	// OSVariant is specific variant of the binary, if applicable. For example,
+	// macsys/appstore/darwin for macOS builds.  Nil/empty where not supported
+	// or on oses without variants.
+	OSVariant string `json:"osVariant,omitempty"`
+
 	// ExtraGitCommit, if non-empty, is the git commit of a "supplemental"
 	// repository at which Tailscale was built. Its format is the same as
 	// gitCommit.
@@ -251,6 +330,7 @@ func GetMeta() Meta {
 			GitCommitTime:   getEmbeddedInfo().commitTime,
 			GitCommit:       gitCommit(),
 			GitDirty:        gitDirty(),
+			OSVariant:       osVariant(),
 			ExtraGitCommit:  extraGitCommitStamp,
 			IsDev:           isDev(),
 			UnstableBranch:  IsUnstableBuild(),

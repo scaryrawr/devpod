@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package netmon
@@ -15,11 +15,18 @@ import (
 	"strings"
 
 	"tailscale.com/envknob"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/hostinfo"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/tsaddr"
-	"tailscale.com/net/tshttpproxy"
+	"tailscale.com/util/mak"
 )
+
+// forceAllIPv6Endpoints is a debug knob that when set forces the client to
+// report all IPv6 endpoints rather than trim endpoints that are siblings on the
+// same interface and subnet.
+var forceAllIPv6Endpoints = envknob.RegisterBool("TS_DEBUG_FORCE_ALL_IPV6_ENDPOINTS")
 
 // LoginEndpointForProxyDetermination is the URL used for testing
 // which HTTP proxy the system should use.
@@ -34,7 +41,12 @@ func isProblematicInterface(nif *net.Interface) bool {
 	// DoS each other by doing traffic amplification, both of them
 	// preferring/trying to use each other for transport. See:
 	// https://github.com/tailscale/tailscale/issues/1208
-	if strings.HasPrefix(name, "zt") || (runtime.GOOS == "windows" && strings.Contains(name, "ZeroTier")) {
+	// TODO(https://github.com/tailscale/tailscale/issues/18824): maybe exclude
+	// "WireGuard tunnel 0" as well on Windows (NetBird), but the name seems too
+	// generic where there is not a platform standard (on Linux wt0 is at least
+	// explicitly different from the WireGuard conventional default of wg0).
+	if strings.HasPrefix(name, "zt") || name == "wt0" /* NetBird */ ||
+		(runtime.GOOS == "windows" && strings.Contains(name, "ZeroTier")) {
 		return true
 	}
 	return false
@@ -65,6 +77,7 @@ func LocalAddresses() (regular, loopback []netip.Addr, err error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		var subnets map[netip.Addr]int
 		for _, a := range addrs {
 			switch v := a.(type) {
 			case *net.IPNet:
@@ -102,7 +115,15 @@ func LocalAddresses() (regular, loopback []netip.Addr, err error) {
 					if ip.Is4() {
 						regular4 = append(regular4, ip)
 					} else {
-						regular6 = append(regular6, ip)
+						curMask, _ := netip.AddrFromSlice(v.IP.Mask(v.Mask))
+						// Limit the number of addresses reported per subnet for
+						// IPv6, as we have seen some nodes with extremely large
+						// numbers of assigned addresses being carved out of
+						// same-subnet allocations.
+						if forceAllIPv6Endpoints() || subnets[curMask] < 2 {
+							regular6 = append(regular6, ip)
+						}
+						mak.Set(&subnets, curMask, subnets[curMask]+1)
 					}
 				}
 			}
@@ -133,12 +154,28 @@ type Interface struct {
 	Desc     string     // extra description (used on Windows)
 }
 
-func (i Interface) IsLoopback() bool { return isLoopback(i.Interface) }
-func (i Interface) IsUp() bool       { return isUp(i.Interface) }
+func (i Interface) IsLoopback() bool {
+	if i.Interface == nil {
+		return false
+	}
+	return isLoopback(i.Interface)
+}
+
+func (i Interface) IsUp() bool {
+	if i.Interface == nil {
+		return false
+	}
+	return isUp(i.Interface)
+}
+
 func (i Interface) Addrs() ([]net.Addr, error) {
 	if i.AltAddrs != nil {
 		return i.AltAddrs, nil
 	}
+	if i.Interface == nil {
+		return nil, nil
+	}
+
 	return i.Interface.Addrs()
 }
 
@@ -166,6 +203,10 @@ func (ifaces InterfaceList) ForeachInterfaceAddress(fn func(Interface, netip.Pre
 			case *net.IPNet:
 				if pfx, ok := netaddr.FromStdIPNet(v); ok {
 					fn(iface, pfx)
+				}
+			case *net.IPAddr:
+				if ip, ok := netip.AddrFromSlice(v.IP); ok {
+					fn(iface, netip.PrefixFrom(ip, ip.BitLen()))
 				}
 			}
 		}
@@ -198,6 +239,10 @@ func (ifaces InterfaceList) ForeachInterface(fn func(Interface, []netip.Prefix))
 			case *net.IPNet:
 				if pfx, ok := netaddr.FromStdIPNet(v); ok {
 					pfxs = append(pfxs, pfx)
+				}
+			case *net.IPAddr:
+				if ip, ok := netip.AddrFromSlice(v.IP); ok {
+					pfxs = append(pfxs, netip.PrefixFrom(ip, ip.BitLen()))
 				}
 			}
 		}
@@ -430,15 +475,22 @@ func hasTailscaleIP(pfxs []netip.Prefix) bool {
 }
 
 func isTailscaleInterface(name string, ips []netip.Prefix) bool {
+	// Sandboxed macOS and Plan9 (and anything else that explicitly calls SetTailscaleInterfaceProps).
+	tsIfName, err := TailscaleInterfaceName()
+	if err == nil {
+		// If we've been told the Tailscale interface name, use that.
+		return name == tsIfName
+	}
+
+	// The sandboxed app should (as of 1.92) set the tun interface name via SetTailscaleInterfaceProps
+	// early in the startup process.  The non-sandboxed app does not.
+	// TODO (barnstar):  If Wireguard created the tun device on darwin, it should know the name and it should
+	// be explicitly set instead checking addresses here.
 	if runtime.GOOS == "darwin" && strings.HasPrefix(name, "utun") && hasTailscaleIP(ips) {
-		// On macOS in the sandboxed app (at least as of
-		// 2021-02-25), we often see two utun devices
-		// (e.g. utun4 and utun7) with the same IPv4 and IPv6
-		// addresses. Just remove all utun devices with
-		// Tailscale IPs until we know what's happening with
-		// macOS NetworkExtensions and utun devices.
 		return true
 	}
+
+	// Windows, Linux...
 	return name == "Tailscale" || // as it is on Windows
 		strings.HasPrefix(name, "tailscale") // TODO: use --tun flag value, etc; see TODO in method doc
 }
@@ -446,23 +498,31 @@ func isTailscaleInterface(name string, ips []netip.Prefix) bool {
 // getPAC, if non-nil, returns the current PAC file URL.
 var getPAC func() string
 
-// GetState returns the state of all the current machine's network interfaces.
+// getState returns the state of all the current machine's network interfaces.
 //
 // It does not set the returned State.IsExpensive. The caller can populate that.
 //
-// Deprecated: use netmon.Monitor.InterfaceState instead.
-func GetState() (*State, error) {
+// optTSInterfaceName is the name of the Tailscale interface, if known.
+func getState(optTSInterfaceName string) (*State, error) {
 	s := &State{
 		InterfaceIPs: make(map[string][]netip.Prefix),
 		Interface:    make(map[string]Interface),
 	}
 	if err := ForeachInterface(func(ni Interface, pfxs []netip.Prefix) {
+		isTSInterfaceName := optTSInterfaceName != "" && ni.Name == optTSInterfaceName
 		ifUp := ni.IsUp()
 		s.Interface[ni.Name] = ni
 		s.InterfaceIPs[ni.Name] = append(s.InterfaceIPs[ni.Name], pfxs...)
-		if !ifUp || isTailscaleInterface(ni.Name, pfxs) {
+
+		// Skip uninteresting interfaces
+		if IsInterestingInterface != nil && !IsInterestingInterface(ni, pfxs) {
 			return
 		}
+
+		if !ifUp || isTSInterfaceName || isTailscaleInterface(ni.Name, pfxs) {
+			return
+		}
+
 		for _, pfx := range pfxs {
 			if pfx.Addr().IsLoopback() {
 				continue
@@ -485,13 +545,15 @@ func GetState() (*State, error) {
 		}
 	}
 
-	if s.AnyInterfaceUp() {
+	if buildfeatures.HasUseProxy && s.AnyInterfaceUp() {
 		req, err := http.NewRequest("GET", LoginEndpointForProxyDetermination, nil)
 		if err != nil {
 			return nil, err
 		}
-		if u, err := tshttpproxy.ProxyFromEnvironment(req); err == nil && u != nil {
-			s.HTTPProxy = u.String()
+		if proxyFromEnv, ok := feature.HookProxyFromEnvironment.GetOk(); ok {
+			if u, err := proxyFromEnv(req); err == nil && u != nil {
+				s.HTTPProxy = u.String()
+			}
 		}
 		if getPAC != nil {
 			s.PAC = getPAC()
@@ -554,6 +616,9 @@ var disableLikelyHomeRouterIPSelf = envknob.RegisterBool("TS_DEBUG_DISABLE_LIKEL
 // the LAN using that gateway.
 // This is used as the destination for UPnP, NAT-PMP, PCP, etc queries.
 func LikelyHomeRouterIP() (gateway, myIP netip.Addr, ok bool) {
+	if !buildfeatures.HasPortMapper {
+		return
+	}
 	// If we don't have a way to get the home router IP, then we can't do
 	// anything; just return.
 	if likelyHomeRouterIP == nil {
@@ -740,7 +805,7 @@ func DefaultRoute() (DefaultRouteDetails, error) {
 
 // HasCGNATInterface reports whether there are any non-Tailscale interfaces that
 // use a CGNAT IP range.
-func HasCGNATInterface() (bool, error) {
+func (m *Monitor) HasCGNATInterface() (bool, error) {
 	hasCGNATInterface := false
 	cgnatRange := tsaddr.CGNATRange()
 	err := ForeachInterface(func(i Interface, pfxs []netip.Prefix) {

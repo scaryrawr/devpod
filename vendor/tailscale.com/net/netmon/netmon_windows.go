@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package netmon
@@ -13,6 +13,7 @@ import (
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/types/logger"
+	"tailscale.com/util/eventbus"
 )
 
 var (
@@ -45,7 +46,7 @@ type winMon struct {
 	noDeadlockTicker *time.Ticker
 }
 
-func newOSMon(logf logger.Logf, pm *Monitor) (osMon, error) {
+func newOSMon(_ *eventbus.Bus, logf logger.Logf, pm *Monitor) (osMon, error) {
 	m := &winMon{
 		logf:             logf,
 		isActive:         pm.isActive,
@@ -72,8 +73,6 @@ func newOSMon(logf logger.Logf, pm *Monitor) (osMon, error) {
 
 	return m, nil
 }
-
-func (m *winMon) IsInterestingInterface(iface string) bool { return true }
 
 func (m *winMon) Close() (ret error) {
 	m.cancel()

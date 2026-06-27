@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package packet
@@ -8,6 +8,7 @@ import (
 	"math"
 )
 
+const igmpHeaderLength = 8
 const tcpHeaderLength = 20
 const sctpHeaderLength = 12
 

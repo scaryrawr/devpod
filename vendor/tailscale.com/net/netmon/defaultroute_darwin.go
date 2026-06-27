@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 //go:build darwin || ios
@@ -6,93 +6,39 @@
 package netmon
 
 import (
-	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
-	"strings"
 
 	"tailscale.com/syncs"
-)
-
-const (
-	LOFT_ADMIN_HOST = "admin.loft.sh"
 )
 
 var (
 	lastKnownDefaultRouteIfName syncs.AtomicValue[string]
 )
 
-// UpdateLastKnownDefaultRouteInterface is called by ipn-go-bridge in the iOS app when
+// UpdateLastKnownDefaultRouteInterface is called by ipn-go-bridge from apple network extensions when
 // our NWPathMonitor instance detects a network path transition.
 func UpdateLastKnownDefaultRouteInterface(ifName string) {
 	if ifName == "" {
 		return
 	}
 	if old := lastKnownDefaultRouteIfName.Swap(ifName); old != ifName {
-		log.Printf("defaultroute_darwin: update from Swift, ifName = %s (was %s)", ifName, old)
-	}
-}
-
-// resolveHostname resolves net.IP of given hostname
-func resolveHostname(hostname string) (net.IP, error) {
-	ips, err := net.LookupIP(hostname)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prefer IPv4 addresses
-	for _, ip := range ips {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			return ipv4, nil
+		interfaces, err := netInterfaces()
+		if err != nil {
+			log.Printf("defaultroute_darwin: UpdateLastKnownDefaultRouteInterface could not get interfaces: %v", err)
+			return
 		}
-	}
 
-	return nil, fmt.Errorf("no IPv4 address found for %s", hostname)
-}
-
-// interfaceTo returns string name of network interface used to reach target IP
-func interfaceTo(ip net.IP) (string, error) {
-	cmd := exec.Command("route", "get", ip.String())
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-
-	lines := strings.Split(out.String(), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "interface:") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				return parts[1], nil
-			}
+		netif, err := getInterfaceByName(ifName, interfaces)
+		if err != nil {
+			log.Printf("defaultroute_darwin: UpdateLastKnownDefaultRouteInterface could not find interface index for %s: %v", ifName, err)
+			return
 		}
+
+		log.Printf("defaultroute_darwin: updated last known default if from OS, ifName = %s index: %d (was %s)", ifName, netif.Index, old)
 	}
-
-	return "", fmt.Errorf("interface to %s not found", ip)
-}
-
-// getInterfaceByRoute gets default interface by checking route to specific host
-func getInterfaceByRoute(host string) (*net.Interface, error) {
-	ip, err := resolveHostname(host)
-	if err != nil {
-		return nil, err
-	}
-
-	ifaceName, err := interfaceTo(ip)
-	if err != nil {
-		return nil, err
-	}
-
-	intf, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return nil, err
-	}
-
-	return intf, nil
 }
 
 func defaultRoute() (d DefaultRouteDetails, err error) {
@@ -108,55 +54,12 @@ func defaultRoute() (d DefaultRouteDetails, err error) {
 	//
 	// If for any reason the Swift machinery didn't work and we don't get any updates, we will
 	// fallback to the BSD logic.
-
-	// Start by getting all available interfaces.
-	interfaces, err := netInterfaces()
-	if err != nil {
-		log.Printf("defaultroute_darwin: could not get interfaces: %v", err)
-		return d, ErrNoGatewayIndexFound
-	}
-
-	getInterfaceByName := func(name string) *Interface {
-		for _, ifc := range interfaces {
-			if ifc.Name != name {
-				continue
-			}
-
-			if !ifc.IsUp() {
-				log.Printf("defaultroute_darwin: %s is down", name)
-				return nil
-			}
-
-			addrs, _ := ifc.Addrs()
-			if len(addrs) == 0 {
-				log.Printf("defaultroute_darwin: %s has no addresses", name)
-				return nil
-			}
-			return &ifc
-		}
-		return nil
-	}
-
-	// Try to get interface by running route against Loft admin
-	iface, err := getInterfaceByRoute(LOFT_ADMIN_HOST)
-	if err == nil {
-		d.InterfaceIndex = iface.Index
-		d.InterfaceName = iface.Name
+	osRoute, osRouteErr := OSDefaultRoute()
+	if osRouteErr == nil {
+		// If we got a valid interface from the OS, use it.
+		d.InterfaceName = osRoute.InterfaceName
+		d.InterfaceIndex = osRoute.InterfaceIndex
 		return d, nil
-	}
-
-	// If that fails (like in air-gapped environments) fallback to default TS logic
-
-	// Did Swift set lastKnownDefaultRouteInterface? If so, we should use it and don't bother
-	// with anything else. However, for sanity, do check whether Swift gave us with an interface
-	// that exists, is up, and has an address.
-	if swiftIfName := lastKnownDefaultRouteIfName.Load(); swiftIfName != "" {
-		ifc := getInterfaceByName(swiftIfName)
-		if ifc != nil {
-			d.InterfaceName = ifc.Name
-			d.InterfaceIndex = ifc.Index
-			return d, nil
-		}
 	}
 
 	// Fallback to the BSD logic
@@ -164,11 +67,56 @@ func defaultRoute() (d DefaultRouteDetails, err error) {
 	if err != nil {
 		return d, err
 	}
-	iface, err = net.InterfaceByIndex(idx)
+	iface, err := net.InterfaceByIndex(idx)
 	if err != nil {
 		return d, err
 	}
 	d.InterfaceName = iface.Name
 	d.InterfaceIndex = idx
 	return d, nil
+}
+
+// OSDefaultRoute returns the DefaultRouteDetails for the default interface as provided by the OS
+// via UpdateLastKnownDefaultRouteInterface.  If UpdateLastKnownDefaultRouteInterface has not been called,
+// the interface name is not valid, or we cannot find its index, an error is returned.
+func OSDefaultRoute() (d DefaultRouteDetails, err error) {
+
+	// Did Swift set lastKnownDefaultRouteInterface? If so, we should use it and don't bother
+	// with anything else. However, for sanity, do check whether Swift gave us with an interface
+	// that exists, is up, and has an address and is not the tunnel itself.
+	if swiftIfName := lastKnownDefaultRouteIfName.Load(); swiftIfName != "" {
+		// Start by getting all available interfaces.
+		interfaces, err := netInterfaces()
+		if err != nil {
+			log.Printf("defaultroute_darwin: could not get interfaces: %v", err)
+			return d, err
+		}
+
+		if ifc, err := getInterfaceByName(swiftIfName, interfaces); err == nil {
+			d.InterfaceName = ifc.Name
+			d.InterfaceIndex = ifc.Index
+			return d, nil
+		}
+	}
+	err = errors.New("no os provided default route interface found")
+	return d, err
+}
+
+func getInterfaceByName(name string, interfaces []Interface) (*Interface, error) {
+	for _, ifc := range interfaces {
+		if ifc.Name != name {
+			continue
+		}
+
+		if !ifc.IsUp() {
+			return nil, fmt.Errorf("defaultroute_darwin: %s is down", name)
+		}
+
+		addrs, _ := ifc.Addrs()
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("defaultroute_darwin: %s has no addresses", name)
+		}
+		return &ifc, nil
+	}
+	return nil, errors.New("no interfaces found")
 }

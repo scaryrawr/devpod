@@ -26,25 +26,28 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var delimiter = "\\$"
-var substitutionNamed = "[_a-z][_a-z0-9]*"
-var substitutionBraced = "[_a-z][_a-z0-9]*(?::?[-+?](.*))?"
-
-var groupEscaped = "escaped"
-var groupNamed = "named"
-var groupBraced = "braced"
-var groupInvalid = "invalid"
-
-var patternString = fmt.Sprintf(
-	"%s(?i:(?P<%s>%s)|(?P<%s>%s)|{(?:(?P<%s>%s)}|(?P<%s>)))",
-	delimiter,
-	groupEscaped, delimiter,
-	groupNamed, substitutionNamed,
-	groupBraced, substitutionBraced,
-	groupInvalid,
+const (
+	delimiter          = "\\$"
+	substitutionNamed  = "[_a-z][_a-z0-9]*"
+	substitutionBraced = "[_a-z][_a-z0-9]*(?::?[-+?](.*))?"
+	groupEscaped       = "escaped"
+	groupNamed         = "named"
+	groupBraced        = "braced"
+	groupInvalid       = "invalid"
 )
 
-var DefaultPattern = regexp.MustCompile(patternString)
+var (
+	patternString = fmt.Sprintf(
+		"%s(?i:(?P<%s>%s)|(?P<%s>%s)|{(?:(?P<%s>%s)}|(?P<%s>)))",
+		delimiter,
+		groupEscaped, delimiter,
+		groupNamed, substitutionNamed,
+		groupBraced, substitutionBraced,
+		groupInvalid,
+	)
+
+	DefaultPattern = regexp.MustCompile(patternString)
+)
 
 // InvalidTemplateError is returned when a variable template is not in a valid
 // format
@@ -306,12 +309,12 @@ func withDefaultWhenPresence(substitution string, mapping Mapping, notEmpty bool
 		return "", false, nil
 	}
 	name, defaultValue := partition(substitution, sep)
-	defaultValue, err := Substitute(defaultValue, mapping)
-	if err != nil {
-		return "", false, err
-	}
 	value, ok := mapping(name)
 	if ok && (!notEmpty || (notEmpty && value != "")) {
+		defaultValue, err := Substitute(defaultValue, mapping)
+		if err != nil {
+			return "", false, err
+		}
 		return defaultValue, true, nil
 	}
 	return value, true, nil
@@ -326,12 +329,12 @@ func withDefaultWhenAbsence(substitution string, mapping Mapping, emptyOrUnset b
 		return "", false, nil
 	}
 	name, defaultValue := partition(substitution, sep)
-	defaultValue, err := Substitute(defaultValue, mapping)
-	if err != nil {
-		return "", false, err
-	}
 	value, ok := mapping(name)
 	if !ok || (emptyOrUnset && value == "") {
+		defaultValue, err := Substitute(defaultValue, mapping)
+		if err != nil {
+			return "", false, err
+		}
 		return defaultValue, true, nil
 	}
 	return value, true, nil
@@ -342,12 +345,12 @@ func withRequired(substitution string, mapping Mapping, sep string, valid func(s
 		return "", false, nil
 	}
 	name, errorMessage := partition(substitution, sep)
-	errorMessage, err := Substitute(errorMessage, mapping)
-	if err != nil {
-		return "", false, err
-	}
 	value, ok := mapping(name)
 	if !ok || !valid(value) {
+		errorMessage, err := Substitute(errorMessage, mapping)
+		if err != nil {
+			return "", false, err
+		}
 		return "", true, &MissingRequiredError{
 			Reason:   errorMessage,
 			Variable: name,

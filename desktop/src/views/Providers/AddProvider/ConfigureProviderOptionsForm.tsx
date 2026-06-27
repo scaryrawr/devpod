@@ -55,11 +55,11 @@ const FieldName = {
   USE_AS_DEFAULT: "useAsDefault",
 } as const
 
-type TFieldValues = Readonly<{
+type TFieldValues = {
   [FieldName.REUSE_MACHINE]: boolean | undefined
   [FieldName.USE_AS_DEFAULT]: boolean
   [key: string]: string | boolean | undefined
-}>
+}
 type TCommonProps = Readonly<{
   providerID: TProviderID
   isModal?: boolean
@@ -465,8 +465,9 @@ function useOptions(
 
       const newOptions: DefaultValues<TFieldValues> = {}
       for (const option in data) {
-        if (data[option]?.value) {
-          newOptions[option] = data[option]?.value ?? undefined
+        const optionValue = data[option]?.value
+        if (optionValue) {
+          newOptions[option] = optionValue
         }
       }
 

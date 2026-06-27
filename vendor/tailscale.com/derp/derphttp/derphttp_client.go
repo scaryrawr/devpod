@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package derphttp implements DERP-over-HTTP.
@@ -30,14 +30,17 @@ import (
 
 	"go4.org/mem"
 	"tailscale.com/derp"
+	"tailscale.com/derp/derpconst"
 	"tailscale.com/envknob"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/health"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netns"
+	"tailscale.com/net/netx"
 	"tailscale.com/net/sockstats"
 	"tailscale.com/net/tlsdial"
-	"tailscale.com/net/tshttpproxy"
 	"tailscale.com/syncs"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstime"
@@ -55,7 +58,7 @@ type Client struct {
 	TLSConfig     *tls.Config        // optional; nil means default
 	HealthTracker *health.Tracker    // optional; used if non-nil only
 	DNSCache      *dnscache.Resolver // optional; nil means no caching
-	MeshKey       string             // optional; for trusted clients
+	MeshKey       key.DERPMesh       // optional; for trusted clients
 	IsProber      bool               // optional; for probers to optional declare themselves as such
 
 	// WatchConnectionChanges is whether the client wishes to subscribe to
@@ -536,7 +539,7 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
 		// just to get routed into the server's HTTP Handler so it
 		// can Hijack the request, but we signal with a special header
 		// that we don't want to deal with its HTTP response.
-		req.Header.Set(fastStartHeader, "1") // suppresses the server's HTTP response
+		req.Header.Set(derp.FastStartHeader, "1") // suppresses the server's HTTP response
 		if err := req.Write(brw); err != nil {
 			return nil, 0, err
 		}
@@ -603,7 +606,7 @@ func (c *Client) connect(ctx context.Context, caller string) (client *derp.Clien
 //
 // The primary use for this is the derper mesh mode to connect to each
 // other over a VPC network.
-func (c *Client) SetURLDialer(dialer func(ctx context.Context, network, addr string) (net.Conn, error)) {
+func (c *Client) SetURLDialer(dialer netx.DialFunc) {
 	c.dialer = dialer
 }
 
@@ -661,14 +664,21 @@ func (c *Client) dialRegion(ctx context.Context, reg *tailcfg.DERPRegion) (net.C
 }
 
 func (c *Client) tlsConfig(node *tailcfg.DERPNode) *tls.Config {
-	tlsConf := tlsdial.Config(c.tlsServerName(node), c.HealthTracker, c.TLSConfig)
+	tlsConf := tlsdial.Config(c.HealthTracker, c.TLSConfig)
+	// node is allowed to be nil here, tlsServerName falls back to using the URL
+	// if node is nil.
+	tlsConf.ServerName = c.tlsServerName(node)
 	if node != nil {
 		if node.InsecureForTests {
 			tlsConf.InsecureSkipVerify = true
 			tlsConf.VerifyConnection = nil
 		}
 		if node.CertName != "" {
-			tlsdial.SetConfigExpectedCert(tlsConf, node.CertName)
+			if suf, ok := strings.CutPrefix(node.CertName, "sha256-raw:"); ok {
+				tlsdial.SetConfigExpectedCertHash(tlsConf, suf)
+			} else {
+				tlsdial.SetConfigExpectedCert(tlsConf, node.CertName)
+			}
 		}
 	}
 	return tlsConf
@@ -682,7 +692,7 @@ func (c *Client) tlsConfig(node *tailcfg.DERPNode) *tls.Config {
 func (c *Client) DialRegionTLS(ctx context.Context, reg *tailcfg.DERPRegion) (tlsConn *tls.Conn, connClose io.Closer, node *tailcfg.DERPNode, err error) {
 	tcpConn, node, err := c.dialRegion(ctx, reg)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("dialRegion(%d): %w", reg.RegionID, err)
 	}
 	done := make(chan bool) // unbuffered
 	defer close(done)
@@ -741,8 +751,12 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
 			Path:   "/", // unused
 		},
 	}
-	if proxyURL, err := tshttpproxy.ProxyFromEnvironment(proxyReq); err == nil && proxyURL != nil {
-		return c.dialNodeUsingProxy(ctx, n, proxyURL)
+	if buildfeatures.HasUseProxy {
+		if proxyFromEnv, ok := feature.HookProxyFromEnvironment.GetOk(); ok {
+			if proxyURL, err := proxyFromEnv(proxyReq); err == nil && proxyURL != nil {
+				return c.dialNodeUsingProxy(ctx, n, proxyURL)
+			}
+		}
 	}
 
 	type res struct {
@@ -757,6 +771,17 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
 
 	nwait := 0
 	startDial := func(dstPrimary, proto string) {
+		dst := cmp.Or(dstPrimary, n.HostName)
+
+		// If dialing an IP address directly, check its address family
+		// and bail out before incrementing nwait.
+		if ip, err := netip.ParseAddr(dst); err == nil {
+			if proto == "tcp4" && ip.Is6() ||
+				proto == "tcp6" && ip.Is4() {
+				return
+			}
+		}
+
 		nwait++
 		go func() {
 			if proto == "tcp4" && c.preferIPv6() {
@@ -771,8 +796,10 @@ func (c *Client) dialNode(ctx context.Context, n *tailcfg.DERPNode) (net.Conn, e
 					// Start v4 dial
 				}
 			}
-			dst := cmp.Or(dstPrimary, n.HostName)
 			port := "443"
+			if !c.useHTTPS() {
+				port = "3340"
+			}
 			if n.DERPPort != 0 {
 				port = fmt.Sprint(n.DERPPort)
 			}
@@ -859,10 +886,14 @@ func (c *Client) dialNodeUsingProxy(ctx context.Context, n *tailcfg.DERPNode, pr
 	target := net.JoinHostPort(n.HostName, "443")
 
 	var authHeader string
-	if v, err := tshttpproxy.GetAuthHeader(pu); err != nil {
-		c.logf("derphttp: error getting proxy auth header for %v: %v", proxyURL, err)
-	} else if v != "" {
-		authHeader = fmt.Sprintf("Proxy-Authorization: %s\r\n", v)
+	if buildfeatures.HasUseProxy {
+		if getAuthHeader, ok := feature.HookProxyGetAuthHeader.GetOk(); ok {
+			if v, err := getAuthHeader(pu); err != nil {
+				c.logf("derphttp: error getting proxy auth header for %v: %v", proxyURL, err)
+			} else if v != "" {
+				authHeader = fmt.Sprintf("Proxy-Authorization: %s\r\n", v)
+			}
+		}
 	}
 
 	if _, err := fmt.Fprintf(proxyConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authHeader); err != nil {
@@ -1150,7 +1181,7 @@ var ErrClientClosed = errors.New("derphttp.Client closed")
 func parseMetaCert(certs []*x509.Certificate) (serverPub key.NodePublic, serverProtoVersion int) {
 	for _, cert := range certs {
 		// Look for derpkey prefix added by initMetacert() on the server side.
-		if pubHex, ok := strings.CutPrefix(cert.Subject.CommonName, "derpkey"); ok {
+		if pubHex, ok := strings.CutPrefix(cert.Subject.CommonName, derpconst.MetaCertCommonNamePrefix); ok {
 			var err error
 			serverPub, err = key.ParseNodePublicUntyped(mem.S(pubHex))
 			if err == nil && cert.SerialNumber.BitLen() <= 8 { // supports up to version 255

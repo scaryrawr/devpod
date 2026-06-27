@@ -6,6 +6,10 @@ variable "DESTDIR" {
   default = "./bin"
 }
 
+variable "BENCH_FILE_SIZE" {
+  default = null
+}
+
 target "_platforms" {
   platforms = [
     "darwin/amd64",
@@ -60,7 +64,33 @@ target "test-noroot" {
   output = ["${DESTDIR}/coverage"]
 }
 
-target "lint" {
+target "bench-root" {
+  inherits = ["build"]
+  target = "bench-root-results"
+  output = ["${DESTDIR}/bench"]
+  args = {
+    BENCH_FILE_SIZE = BENCH_FILE_SIZE
+  }
+}
+
+target "bench-noroot" {
+  inherits = ["build"]
+  target = "bench-noroot-results"
+  output = ["${DESTDIR}/bench"]
+  args = {
+    BENCH_FILE_SIZE = BENCH_FILE_SIZE
+  }
+}
+
+group "lint" {
+  targets = ["lint-golangci", "lint-gopls"]
+}
+
+group "lint-cross" {
+  targets = ["lint-golangci-cross", "lint-gopls-cross"]
+}
+
+target "lint-golangci" {
   inherits = ["_common"]
   dockerfile = "./hack/dockerfiles/lint.Dockerfile"
   output = ["type=cacheonly"]
@@ -69,8 +99,17 @@ target "lint" {
   }
 }
 
-target "lint-cross" {
-  inherits = ["lint", "_platforms"]
+target "lint-gopls" {
+  inherits = ["lint-golangci"]
+  target = "gopls-analyze"
+}
+
+target "lint-golangci-cross" {
+  inherits = ["lint-golangci", "_platforms"]
+}
+
+target "lint-gopls-cross" {
+  inherits = ["lint-gopls", "_platforms"]
 }
 
 target "validate-generated-files" {

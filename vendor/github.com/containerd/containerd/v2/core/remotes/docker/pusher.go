@@ -28,14 +28,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/core/remotes"
-	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/remotes"
 )
 
 type dockerPusher struct {
@@ -59,6 +59,12 @@ func (p dockerPusher) Writer(ctx context.Context, opts ...content.WriterOpt) (co
 	}
 	if wOpts.Ref == "" {
 		return nil, fmt.Errorf("ref must not be empty: %w", errdefs.ErrInvalidArgument)
+	}
+	if wOpts.Desc.Digest == "" {
+		return nil, fmt.Errorf("descriptor digest must not be empty: %w", errdefs.ErrInvalidArgument)
+	}
+	if wOpts.Desc.MediaType == "" {
+		return nil, fmt.Errorf("descriptor media type must not be empty: %w", errdefs.ErrInvalidArgument)
 	}
 	return p.push(ctx, wOpts.Desc, wOpts.Ref, true)
 }
@@ -111,11 +117,14 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 	}
 
 	req := p.request(host, http.MethodHead, existCheck...)
+	if err := req.addNamespace(p.refspec.Hostname()); err != nil {
+		return nil, err
+	}
 	req.header.Set("Accept", strings.Join([]string{desc.MediaType, `*/*`}, ", "))
 
-	log.G(ctx).WithField("url", req.String()).Debugf("checking and pushing to")
+	log.G(ctx).WithField("url", req.sanitizedURL()).Debugf("checking and pushing to")
 
-	resp, err := req.doWithRetries(ctx, nil)
+	resp, err := req.doWithRetries(ctx, true)
 	if err != nil {
 		if !errors.Is(err, ErrInvalidAuthorization) {
 			return nil, err
@@ -148,8 +157,8 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 				return nil, fmt.Errorf("content %v on remote: %w", desc.Digest, errdefs.ErrAlreadyExists)
 			}
 		} else if resp.StatusCode != http.StatusNotFound {
-			err := remoteserrors.NewUnexpectedStatusErr(resp)
-			log.G(ctx).WithField("resp", resp).WithField("body", string(err.(remoteserrors.ErrUnexpectedStatus).Body)).Debug("unexpected response")
+			err := unexpectedResponseErr(resp)
+			log.G(ctx).WithError(err).Debug("unexpected response")
 			resp.Body.Close()
 			return nil, err
 		}
@@ -159,10 +168,16 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 	if isManifest {
 		putPath := getManifestPath(p.object, desc.Digest)
 		req = p.request(host, http.MethodPut, putPath...)
+		if err := req.addNamespace(p.refspec.Hostname()); err != nil {
+			return nil, err
+		}
 		req.header.Add("Content-Type", desc.MediaType)
 	} else {
 		// Start upload request
 		req = p.request(host, http.MethodPost, "blobs", "uploads/")
+		if err := req.addNamespace(p.refspec.Hostname()); err != nil {
+			return nil, err
+		}
 
 		mountedFrom := ""
 		var resp *http.Response
@@ -176,24 +191,28 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 			//
 			// for the private repo, we should remove mount-from
 			// query and send the request again.
-			resp, err = preq.doWithRetries(pctx, nil)
+			resp, err = preq.doWithRetries(pctx, true)
 			if err != nil {
-				return nil, err
+				if !errors.Is(err, ErrInvalidAuthorization) {
+					return nil, fmt.Errorf("pushing with mount from %s: %w", fromRepo, err)
+				}
+				log.G(ctx).Debugf("failed to push with mount from repository %s: %v", fromRepo, err)
 			}
+			if resp != nil {
+				switch resp.StatusCode {
+				case http.StatusUnauthorized:
+					log.G(ctx).Debugf("failed to mount from repository %s, not authorized", fromRepo)
 
-			switch resp.StatusCode {
-			case http.StatusUnauthorized:
-				log.G(ctx).Debugf("failed to mount from repository %s", fromRepo)
-
-				resp.Body.Close()
-				resp = nil
-			case http.StatusCreated:
-				mountedFrom = path.Join(p.refspec.Hostname(), fromRepo)
+					resp.Body.Close()
+					resp = nil
+				case http.StatusCreated:
+					mountedFrom = path.Join(p.refspec.Hostname(), fromRepo)
+				}
 			}
 		}
 
 		if resp == nil {
-			resp, err = req.doWithRetries(ctx, nil)
+			resp, err = req.doWithRetries(ctx, true)
 			if err != nil {
 				if errors.Is(err, ErrInvalidAuthorization) {
 					return nil, fmt.Errorf("push access denied, repository does not exist or may require authorization: %w", err)
@@ -219,8 +238,8 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 			})
 			return nil, fmt.Errorf("content %v on remote: %w", desc.Digest, errdefs.ErrAlreadyExists)
 		default:
-			err := remoteserrors.NewUnexpectedStatusErr(resp)
-			log.G(ctx).WithField("resp", resp).WithField("body", string(err.(remoteserrors.ErrUnexpectedStatus).Body)).Debug("unexpected response")
+			err := unexpectedResponseErr(resp)
+			log.G(ctx).WithError(err).Debug("unexpected response")
 			return nil, err
 		}
 
@@ -263,6 +282,9 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		req = p.request(lhost, http.MethodPut)
 		req.header.Set("Content-Type", "application/octet-stream")
 		req.path = lurl.Path + "?" + q.Encode()
+		if err := req.addNamespace(p.refspec.Hostname()); err != nil {
+			return nil, err
+		}
 	}
 	p.tracker.SetStatus(ref, Status{
 		Status: content.Status{
@@ -285,7 +307,7 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 	req.size = desc.Size
 
 	go func() {
-		resp, err := req.doWithRetries(ctx, nil)
+		resp, err := req.doWithRetries(ctx, true)
 		if err != nil {
 			pushw.setError(err)
 			return
@@ -294,8 +316,8 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		switch resp.StatusCode {
 		case http.StatusOK, http.StatusCreated, http.StatusNoContent:
 		default:
-			err := remoteserrors.NewUnexpectedStatusErr(resp)
-			log.G(ctx).WithField("resp", resp).WithField("body", string(err.(remoteserrors.ErrUnexpectedStatus).Body)).Debug("unexpected response")
+			err := unexpectedResponseErr(resp)
+			log.G(ctx).WithError(err).Debug("unexpected response")
 			pushw.setError(err)
 			return
 		}
@@ -477,13 +499,15 @@ func (pw *pushWriter) Digest() digest.Digest {
 
 func (pw *pushWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
 	// Check whether read has already thrown an error
-	if _, err := pw.pipe.Write([]byte{}); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-		return fmt.Errorf("pipe error before commit: %w", err)
+	if pw.pipe != nil {
+		if _, err := pw.pipe.Write([]byte{}); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+			return fmt.Errorf("pipe error before commit: %w", err)
+		}
+		if err := pw.pipe.Close(); err != nil {
+			return err
+		}
 	}
 
-	if err := pw.pipe.Close(); err != nil {
-		return err
-	}
 	// TODO: timeout waiting for response
 	var resp *http.Response
 	select {
@@ -506,7 +530,7 @@ func (pw *pushWriter) Commit(ctx context.Context, size int64, expected digest.Di
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusNoContent, http.StatusAccepted:
 	default:
-		return remoteserrors.NewUnexpectedStatusErr(resp)
+		return unexpectedResponseErr(resp)
 	}
 
 	status, err := pw.tracker.GetStatus(pw.ref)
@@ -520,15 +544,21 @@ func (pw *pushWriter) Commit(ctx context.Context, size int64, expected digest.Di
 
 	if expected == "" {
 		expected = status.Expected
+	} else if expected != status.Expected {
+		return fmt.Errorf("unexpected digest received: got %q, expected %q", status.Expected, expected)
 	}
 
-	actual, err := digest.Parse(resp.Header.Get("Docker-Content-Digest"))
-	if err != nil {
-		return fmt.Errorf("invalid content digest in response: %w", err)
-	}
+	if dgstHdr := resp.Header.Get("Docker-Content-Digest"); dgstHdr != "" {
+		actual, err := digest.Parse(dgstHdr)
+		if err != nil {
+			return fmt.Errorf("invalid content digest in response: %w", err)
+		}
 
-	if actual != expected {
-		return fmt.Errorf("got digest %s, expected %s", actual, expected)
+		if actual != expected {
+			return fmt.Errorf("got digest %s, expected %s", actual, expected)
+		}
+	} else {
+		log.G(ctx).Info("registry did not send a Docker-Content-Digest header")
 	}
 
 	status.Committed = true

@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package version provides the version that the binary was built at.
@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 
 	tailscaleroot "tailscale.com"
 	"tailscale.com/types/lazy"
@@ -117,7 +118,7 @@ func (i embeddedInfo) commitAbbrev() string {
 	return i.commit
 }
 
-var getEmbeddedInfo = lazy.SyncFunc(func() embeddedInfo {
+var getEmbeddedInfo = sync.OnceValue(func() embeddedInfo {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return embeddedInfo{}

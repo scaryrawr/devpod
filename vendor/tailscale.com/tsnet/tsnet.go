@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package tsnet provides Tailscale as a library.
@@ -26,12 +26,20 @@ import (
 	"sync"
 	"time"
 
-	"tailscale.com/client/tailscale"
+	"github.com/tailscale/wireguard-go/tun"
+	"tailscale.com/client/local"
 	"tailscale.com/control/controlclient"
 	"tailscale.com/envknob"
+	_ "tailscale.com/feature/c2n"
+	_ "tailscale.com/feature/condregister/identityfederation"
+	_ "tailscale.com/feature/condregister/oauthkey"
+	_ "tailscale.com/feature/condregister/portmapper"
+	_ "tailscale.com/feature/condregister/useproxy"
 	"tailscale.com/health"
 	"tailscale.com/hostinfo"
+	"tailscale.com/internal/client/tailscale"
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnauth"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/ipn/localapi"
@@ -40,13 +48,14 @@ import (
 	"tailscale.com/logpolicy"
 	"tailscale.com/logtail"
 	"tailscale.com/logtail/filch"
-	"tailscale.com/net/dns"
 	"tailscale.com/net/memnet"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/proxymux"
 	"tailscale.com/net/socks5"
 	"tailscale.com/net/tsdial"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsd"
+	"tailscale.com/types/bools"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/logid"
 	"tailscale.com/types/nettype"
@@ -79,7 +88,7 @@ type Server struct {
 	// If nil, a new FileStore is initialized at `Dir/tailscaled.state`.
 	// See tailscale.com/ipn/store for supported stores.
 	//
-	// Logs will automatically be uploaded to log.tailscale.io,
+	// Logs will automatically be uploaded to log.tailscale.com,
 	// where the configuration file for logging will be saved at
 	// `Dir/tailscaled.log.conf`.
 	Store ipn.StateStore
@@ -109,6 +118,37 @@ type Server struct {
 	// used.
 	AuthKey string
 
+	// ClientSecret, if non-empty, is the OAuth client secret
+	// that will be used to generate authkeys via OAuth. It
+	// will be preferred over the TS_CLIENT_SECRET environment
+	// variable. If the node is already created (from state
+	// previously stored in Store), then this field is not
+	// used.
+	ClientSecret string
+
+	// ClientID, if non-empty, is the client ID used to generate
+	// authkeys via workload identity federation. It will be
+	// preferred over the TS_CLIENT_ID environment variable.
+	// If the node is already created (from state previously
+	// stored in Store), then this field is not used.
+	ClientID string
+
+	// IDToken, if non-empty, is the ID token from the identity
+	// provider to exchange with the control server for workload
+	// identity federation. It will be preferred over the
+	// TS_ID_TOKEN environment variable. If the node is already
+	// created (from state previously stored in Store), then this
+	// field is not used.
+	IDToken string
+
+	// Audience, if non-empty, is the audience to use when requesting
+	// an ID token from a well-known identity provider to exchange
+	// with the control server for workload identity federation. It
+	// will be preferred over the TS_AUDIENCE environment variable. If
+	// the node is already created (from state previously stored in Store),
+	// then this field is not used.
+	Audience string
+
 	// ControlURL optionally specifies the coordination server URL.
 	// If empty, the Tailscale default is used.
 	ControlURL string
@@ -122,33 +162,44 @@ type Server struct {
 	// field at zero unless you know what you are doing.
 	Port uint16
 
-	getCertForTesting func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	// AdvertiseTags specifies tags that should be applied to this node, for
+	// purposes of ACL enforcement. These can be referenced from the ACL policy
+	// document. Note that advertising a tag on the client doesn't guarantee
+	// that the control server will allow the node to adopt that tag.
+	AdvertiseTags []string
 
-	initOnce         sync.Once
-	initErr          error
-	lb               *ipnlocal.LocalBackend
-	sys              *tsd.System
-	netstack         *netstack.Impl
-	netMon           *netmon.Monitor
-	rootPath         string // the state directory
-	hostname         string
-	shutdownCtx      context.Context
-	shutdownCancel   context.CancelFunc
-	proxyCred        string                 // SOCKS5 proxy auth for loopbackListener
-	localAPICred     string                 // basic auth password for loopbackListener
-	loopbackListener net.Listener           // optional loopback for localapi and proxies
-	localAPIListener net.Listener           // in-memory, used by localClient
-	localClient      *tailscale.LocalClient // in-memory
-	localAPIServer   *http.Server
-	logbuffer        *filch.Filch
-	logtail          *logtail.Logger
-	logid            logid.PublicID
+	// Tun, if non-nil, specifies a custom tun.Device to use for packet I/O.
+	//
+	// This field must be set before calling Start.
+	Tun tun.Device
+
+	initOnce             sync.Once
+	initErr              error
+	lb                   *ipnlocal.LocalBackend
+	sys                  *tsd.System
+	netstack             *netstack.Impl
+	netMon               *netmon.Monitor
+	rootPath             string // the state directory
+	hostname             string
+	shutdownCtx          context.Context
+	shutdownCancel       context.CancelFunc
+	proxyCred            string        // SOCKS5 proxy auth for loopbackListener
+	localAPICred         string        // basic auth password for loopbackListener
+	loopbackListener     net.Listener  // optional loopback for localapi and proxies
+	localAPIListener     net.Listener  // in-memory, used by localClient
+	localClient          *local.Client // in-memory
+	localAPIServer       *http.Server
+	resetServeConfigOnce sync.Once
+	logbuffer            *filch.Filch
+	logtail              *logtail.Logger
+	logid                logid.PublicID
 
 	mu                  sync.Mutex
 	listeners           map[listenKey]*listener
+	nextEphemeralPort   uint16 // next port to try in ephemeral range; 0 means use ephemeralPortFirst
 	fallbackTCPHandlers set.HandleSet[FallbackTCPHandler]
 	dialer              *tsdial.Dialer
-	closed              bool
+	closeOnce           sync.Once
 }
 
 // FallbackTCPHandler describes the callback which
@@ -170,7 +221,39 @@ func (s *Server) Dial(ctx context.Context, network, address string) (net.Conn, e
 	if err := s.Start(); err != nil {
 		return nil, err
 	}
+	if err := s.awaitRunning(ctx); err != nil {
+		return nil, err
+	}
 	return s.dialer.UserDial(ctx, network, address)
+}
+
+// awaitRunning waits until the backend is in state Running.
+// If the backend is in state Starting, it blocks until it reaches
+// a terminal state (such as Stopped, NeedsMachineAuth)
+// or the context expires.
+func (s *Server) awaitRunning(ctx context.Context) error {
+	st := s.lb.State()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		switch st {
+		case ipn.Running:
+			return nil
+		case ipn.NeedsLogin, ipn.Starting:
+			// Even after LocalBackend.Start, the state machine is still briefly
+			// in the "NeedsLogin" state. So treat that as also "Starting" and
+			// wait for us to get out of that state.
+			s.lb.WatchNotifications(ctx, ipn.NotifyInitialState, nil, func(n *ipn.Notify) (keepGoing bool) {
+				if n.State != nil {
+					st = *n.State
+				}
+				return st == ipn.NeedsLogin || st == ipn.Starting
+			})
+		default:
+			return fmt.Errorf("tsnet: backend in state %v", st)
+		}
+	}
 }
 
 // HTTPClient returns an HTTP client that is configured to connect over Tailscale.
@@ -189,7 +272,7 @@ func (s *Server) HTTPClient() *http.Client {
 //
 // It will start the server if it has not been started yet. If the server's
 // already been started successfully, it doesn't return an error.
-func (s *Server) LocalClient() (*tailscale.LocalClient, error) {
+func (s *Server) LocalClient() (*local.Client, error) {
 	if err := s.Start(); err != nil {
 		return nil, err
 	}
@@ -240,7 +323,13 @@ func (s *Server) Loopback() (addr string, proxyCred, localAPICred string, err er
 		// out the CONNECT code from tailscaled/proxy.go that uses
 		// httputil.ReverseProxy and adding auth support.
 		go func() {
-			lah := localapi.NewHandler(s.lb, s.logf, s.logid)
+			lah := localapi.NewHandler(localapi.HandlerConfig{
+				Actor:    ipnauth.Self,
+				Backend:  s.lb,
+				Logf:     s.logf,
+				LogID:    s.logid,
+				EventBus: s.sys.Bus.Get(),
+			})
 			lah.PermitWrite = true
 			lah.PermitRead = true
 			lah.RequiredPassword = s.localAPICred
@@ -300,7 +389,7 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 		return nil, fmt.Errorf("tsnet.Up: %w", err)
 	}
 
-	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState|ipn.NotifyNoPrivateKeys)
+	watcher, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
 	if err != nil {
 		return nil, fmt.Errorf("tsnet.Up: %w", err)
 	}
@@ -314,8 +403,8 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 		if n.ErrMessage != nil {
 			return nil, fmt.Errorf("tsnet.Up: backend: %s", *n.ErrMessage)
 		}
-		if s := n.State; s != nil {
-			if *s == ipn.Running {
+		if st := n.State; st != nil {
+			if *st == ipn.Running {
 				status, err := lc.Status(ctx)
 				if err != nil {
 					return nil, fmt.Errorf("tsnet.Up: %w", err)
@@ -324,11 +413,15 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 					return nil, errors.New("tsnet.Up: running, but no ip")
 				}
 
-				// Clear the persisted serve config state to prevent stale configuration
-				// from code changes. This is a temporary workaround until we have a better
-				// way to handle this. (2023-03-11)
-				if err := lc.SetServeConfig(ctx, new(ipn.ServeConfig)); err != nil {
-					return nil, fmt.Errorf("tsnet.Up: %w", err)
+				// The first time Up is run, clear the persisted serve config.
+				// We do this to prevent messy interactions with stale config in
+				// the face of code changes.
+				var srvResetErr error
+				s.resetServeConfigOnce.Do(func() {
+					srvResetErr = lc.SetServeConfig(ctx, new(ipn.ServeConfig))
+				})
+				if srvResetErr != nil {
+					return nil, fmt.Errorf("tsnet.Up: clearing serve config: %w", err)
 				}
 
 				return status, nil
@@ -347,11 +440,29 @@ func (s *Server) Up(ctx context.Context) (*ipnstate.Status, error) {
 //
 // It must not be called before or concurrently with Start.
 func (s *Server) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	didClose := false
+	s.closeOnce.Do(func() {
+		didClose = true
+		s.close()
+	})
+	if !didClose {
 		return fmt.Errorf("tsnet: %w", net.ErrClosed)
 	}
+	return nil
+}
+
+func (s *Server) close() {
+	// Close listeners under s.mu, then release before the heavy shutdown
+	// operations. We must not hold s.mu during netstack.Close, lb.Shutdown,
+	// etc. because callbacks from gVisor (e.g. getTCPHandlerForFlow)
+	// acquire s.mu, and waiting for those goroutines while holding the lock
+	// would deadlock.
+	s.mu.Lock()
+	for _, ln := range s.listeners {
+		ln.closeLocked()
+	}
+	s.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -374,12 +485,11 @@ func (s *Server) Close() error {
 		}
 	}()
 
-	if s.netstack != nil {
-		s.netstack.Close()
-		s.netstack = nil
-	}
 	if s.shutdownCancel != nil {
 		s.shutdownCancel()
+	}
+	if s.netstack != nil {
+		s.netstack.Close()
 	}
 	if s.lb != nil {
 		s.lb.Shutdown()
@@ -397,13 +507,8 @@ func (s *Server) Close() error {
 		s.loopbackListener.Close()
 	}
 
-	for _, ln := range s.listeners {
-		ln.closeLocked()
-	}
-
 	wg.Wait()
-	s.closed = true
-	return nil
+	s.sys.Bus.Get().Close()
 }
 
 func (s *Server) doInit() {
@@ -447,6 +552,16 @@ func (s *Server) TailscaleIPs() (ip4, ip6 netip.Addr) {
 	return ip4, ip6
 }
 
+// LogtailWriter returns an [io.Writer] that writes to Tailscale's logging service and will be only visible to Tailscale's
+// support team. Logs written there cannot be retrieved by the user. This method always returns a non-nil value.
+func (s *Server) LogtailWriter() io.Writer {
+	if s.logtail == nil {
+		return io.Discard
+	}
+
+	return s.logtail
+}
+
 func (s *Server) getAuthKey() string {
 	if v := s.AuthKey; v != "" {
 		return v
@@ -455,6 +570,34 @@ func (s *Server) getAuthKey() string {
 		return v
 	}
 	return os.Getenv("TS_AUTH_KEY")
+}
+
+func (s *Server) getClientSecret() string {
+	if v := s.ClientSecret; v != "" {
+		return v
+	}
+	return os.Getenv("TS_CLIENT_SECRET")
+}
+
+func (s *Server) getClientID() string {
+	if v := s.ClientID; v != "" {
+		return v
+	}
+	return os.Getenv("TS_CLIENT_ID")
+}
+
+func (s *Server) getIDToken() string {
+	if v := s.IDToken; v != "" {
+		return v
+	}
+	return os.Getenv("TS_ID_TOKEN")
+}
+
+func (s *Server) getAudience() string {
+	if v := s.Audience; v != "" {
+		return v
+	}
+	return os.Getenv("TS_AUDIENCE")
 }
 
 func (s *Server) start() (reterr error) {
@@ -469,6 +612,11 @@ func (s *Server) start() (reterr error) {
 			// 1.21), but we don't really care much: it's only used as a default
 			// directory and hostname when they're not supplied. But we can fall
 			// back to "tsnet" as well.
+			exe = "tsnet"
+		case "ios":
+			// When compiled as a framework (via TailscaleKit in libtailscale),
+			// os.Executable() returns an error, so fall back to "tsnet" there
+			// too.
 			exe = "tsnet"
 		default:
 			return err
@@ -494,10 +642,7 @@ func (s *Server) start() (reterr error) {
 		if err != nil {
 			return err
 		}
-		s.rootPath, err = getTSNetDir(s.logf, confDir, prog)
-		if err != nil {
-			return err
-		}
+		s.rootPath = filepath.Join(confDir, "tsnet-"+prog)
 	}
 	if err := os.MkdirAll(s.rootPath, 0700); err != nil {
 		return err
@@ -518,26 +663,29 @@ func (s *Server) start() (reterr error) {
 		s.Logf(format, a...)
 	}
 
-	sys := new(tsd.System)
+	sys := tsd.NewSystem()
 	s.sys = sys
-	if err := s.startLogger(&closePool, sys.HealthTracker(), tsLogf); err != nil {
+	if err := s.startLogger(&closePool, sys.HealthTracker.Get(), tsLogf); err != nil {
 		return err
 	}
 
-	s.netMon, err = netmon.New(tsLogf)
+	s.netMon, err = netmon.New(sys.Bus.Get(), tsLogf)
 	if err != nil {
 		return err
 	}
 	closePool.add(s.netMon)
 
 	s.dialer = &tsdial.Dialer{Logf: tsLogf} // mutated below (before used)
+	s.dialer.SetBus(sys.Bus.Get())
 	eng, err := wgengine.NewUserspaceEngine(tsLogf, wgengine.Config{
+		Tun:           s.Tun,
+		EventBus:      sys.Bus.Get(),
 		ListenPort:    s.Port,
 		NetMon:        s.netMon,
 		Dialer:        s.dialer,
 		SetSubsystem:  sys.Set,
 		ControlKnobs:  sys.ControlKnobs(),
-		HealthTracker: sys.HealthTracker(),
+		HealthTracker: sys.HealthTracker.Get(),
 		Metrics:       sys.UserMetricsRegistry(),
 	})
 	if err != nil {
@@ -545,9 +693,7 @@ func (s *Server) start() (reterr error) {
 	}
 	closePool.add(s.dialer)
 	sys.Set(eng)
-	sys.HealthTracker().SetMetricsRegistry(sys.UserMetricsRegistry())
-
-	s.dialer.UserDialCustomResolver = dns.Quad100Resolver(context.Background(), sys.DNSManager.Get())
+	sys.HealthTracker.Get().SetMetricsRegistry(sys.UserMetricsRegistry())
 
 	// TODO(oxtoacart): do we need to support Taildrive on tsnet, and if so, how?
 	ns, err := netstack.Create(tsLogf, sys.Tun.Get(), eng, sys.MagicSock.Get(), s.dialer, sys.DNSManager.Get(), sys.ProxyMapper())
@@ -556,8 +702,16 @@ func (s *Server) start() (reterr error) {
 	}
 	sys.Tun.Get().Start()
 	sys.Set(ns)
-	ns.ProcessLocalIPs = true
-	ns.ProcessSubnets = true
+	if s.Tun == nil {
+		// Only process packets in netstack when using the default fake TUN.
+		// When a TUN is provided, let packets flow through it instead.
+		ns.ProcessLocalIPs = true
+		ns.ProcessSubnets = true
+	} else {
+		// When using a TUN, check gVisor for registered endpoints to handle
+		// packets for tsnet listeners and outbound connection replies.
+		ns.CheckLocalTransportEndpoints = true
+	}
 	ns.GetTCPHandlerForFlow = s.getTCPHandlerForFlow
 	ns.GetUDPHandlerForFlow = s.getUDPHandlerForFlow
 	s.netstack = ns
@@ -569,7 +723,9 @@ func (s *Server) start() (reterr error) {
 		// Note: don't just return ns.DialContextTCP or we'll return
 		// *gonet.TCPConn(nil) instead of a nil interface which trips up
 		// callers.
-		tcpConn, err := ns.DialContextTCP(ctx, dst)
+		v4, v6 := s.TailscaleIPs()
+		src := bools.IfElse(dst.Addr().Is6(), v6, v4)
+		tcpConn, err := ns.DialContextTCPWithBind(ctx, src, dst)
 		if err != nil {
 			return nil, err
 		}
@@ -579,7 +735,9 @@ func (s *Server) start() (reterr error) {
 		// Note: don't just return ns.DialContextUDP or we'll return
 		// *gonet.UDPConn(nil) instead of a nil interface which trips up
 		// callers.
-		udpConn, err := ns.DialContextUDP(ctx, dst)
+		v4, v6 := s.TailscaleIPs()
+		src := bools.IfElse(dst.Addr().Is6(), v6, v4)
+		udpConn, err := ns.DialContextUDPWithBind(ctx, src, dst)
 		if err != nil {
 			return nil, err
 		}
@@ -617,7 +775,11 @@ func (s *Server) start() (reterr error) {
 	prefs.WantRunning = true
 	prefs.ControlURL = s.ControlURL
 	prefs.RunWebClient = s.RunWebClient
-	authKey := s.getAuthKey()
+	prefs.AdvertiseTags = s.AdvertiseTags
+	authKey, err := s.resolveAuthKey()
+	if err != nil {
+		return fmt.Errorf("error resolving auth key: %w", err)
+	}
 	err = lb.Start(ipn.Options{
 		UpdatePrefs: prefs,
 		AuthKey:     authKey,
@@ -637,7 +799,13 @@ func (s *Server) start() (reterr error) {
 	go s.printAuthURLLoop()
 
 	// Run the localapi handler, to allow fetching LetsEncrypt certs.
-	lah := localapi.NewHandler(lb, tsLogf, s.logid)
+	lah := localapi.NewHandler(localapi.HandlerConfig{
+		Actor:    ipnauth.Self,
+		Backend:  lb,
+		Logf:     tsLogf,
+		LogID:    s.logid,
+		EventBus: sys.Bus.Get(),
+	})
 	lah.PermitWrite = true
 	lah.PermitRead = true
 
@@ -645,7 +813,7 @@ func (s *Server) start() (reterr error) {
 	// nettest.Listen provides a in-memory pipe based implementation for net.Conn.
 	lal := memnet.Listen("local-tailscaled.sock:80")
 	s.localAPIListener = lal
-	s.localClient = &tailscale.LocalClient{Dial: lal.Dial}
+	s.localClient = &local.Client{Dial: lal.Dial}
 	s.localAPIServer = &http.Server{Handler: lah}
 	s.lb.ConfigureWebClient(s.localClient)
 	go func() {
@@ -655,6 +823,51 @@ func (s *Server) start() (reterr error) {
 	}()
 	closePool.add(s.localAPIListener)
 	return nil
+}
+
+func (s *Server) resolveAuthKey() (string, error) {
+	authKey := s.getAuthKey()
+	var err error
+	// Try to use an OAuth secret to generate an auth key if that functionality
+	// is available.
+	resolveViaOAuth, oauthOk := tailscale.HookResolveAuthKey.GetOk()
+	if oauthOk {
+		clientSecret := authKey
+		if authKey == "" {
+			clientSecret = s.getClientSecret()
+		}
+		authKey, err = resolveViaOAuth(s.shutdownCtx, clientSecret, s.AdvertiseTags)
+		if err != nil {
+			return "", err
+		}
+	}
+	// Try to resolve the auth key via workload identity federation if that functionality
+	// is available and no auth key is yet determined.
+	resolveViaWIF, wifOk := tailscale.HookResolveAuthKeyViaWIF.GetOk()
+	if wifOk && authKey == "" {
+		clientID := s.getClientID()
+		idToken := s.getIDToken()
+		audience := s.getAudience()
+		if clientID != "" && idToken == "" && audience == "" {
+			return "", fmt.Errorf("client ID for workload identity federation found, but ID token and audience are empty")
+		}
+		if idToken != "" && audience != "" {
+			return "", fmt.Errorf("only one of ID token and audience should be for workload identity federation")
+		}
+		if clientID == "" {
+			if idToken != "" {
+				return "", fmt.Errorf("ID token for workload identity federation found, but client ID is empty")
+			}
+			if audience != "" {
+				return "", fmt.Errorf("audience for workload identity federation found, but client ID is empty")
+			}
+		}
+		authKey, err = resolveViaWIF(s.shutdownCtx, s.ControlURL, clientID, idToken, audience, s.AdvertiseTags)
+		if err != nil {
+			return "", err
+		}
+	}
+	return authKey, nil
 }
 
 func (s *Server) startLogger(closePool *closeOnErrorPool, health *health.Tracker, tsLogf logger.Logf) error {
@@ -688,6 +901,7 @@ func (s *Server) startLogger(closePool *closeOnErrorPool, health *health.Tracker
 		Stderr:       io.Discard, // log everything to Buffer
 		Buffer:       s.logbuffer,
 		CompressLogs: true,
+		Bus:          s.sys.Bus.Get(),
 		HTTPC:        &http.Client{Transport: logpolicy.NewLogtailTransport(logtail.DefaultHost, s.netMon, health, tsLogf)},
 		MetricsDelta: clientmetric.EncodeLogTailMetricsDelta,
 	}
@@ -852,66 +1066,6 @@ func (s *Server) getUDPHandlerForFlow(src, dst netip.AddrPort) (handler func(net
 	return func(c nettype.ConnPacketConn) { ln.handle(c) }, true
 }
 
-// getTSNetDir usually just returns filepath.Join(confDir, "tsnet-"+prog)
-// with no error.
-//
-// One special case is that it renames old "tslib-" directories to
-// "tsnet-", and that rename might return an error.
-//
-// TODO(bradfitz): remove this maybe 6 months after 2022-03-17,
-// once people (notably Tailscale corp services) have updated.
-func getTSNetDir(logf logger.Logf, confDir, prog string) (string, error) {
-	oldPath := filepath.Join(confDir, "tslib-"+prog)
-	newPath := filepath.Join(confDir, "tsnet-"+prog)
-
-	fi, err := os.Lstat(oldPath)
-	if os.IsNotExist(err) {
-		// Common path.
-		return newPath, nil
-	}
-	if err != nil {
-		return "", err
-	}
-	if !fi.IsDir() {
-		return "", fmt.Errorf("expected old tslib path %q to be a directory; got %v", oldPath, fi.Mode())
-	}
-
-	// At this point, oldPath exists and is a directory. But does
-	// the new path exist?
-
-	fi, err = os.Lstat(newPath)
-	if err == nil && fi.IsDir() {
-		// New path already exists somehow. Ignore the old one and
-		// don't try to migrate it.
-		return newPath, nil
-	}
-	if err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-	if err := os.Rename(oldPath, newPath); err != nil {
-		return "", err
-	}
-	logf("renamed old tsnet state storage directory %q to %q", oldPath, newPath)
-	return newPath, nil
-}
-
-// APIClient returns a tailscale.Client that can be used to make authenticated
-// requests to the Tailscale control server.
-// It requires the user to set tailscale.I_Acknowledge_This_API_Is_Unstable.
-func (s *Server) APIClient() (*tailscale.Client, error) {
-	if !tailscale.I_Acknowledge_This_API_Is_Unstable {
-		return nil, errors.New("use of Client without setting I_Acknowledge_This_API_Is_Unstable")
-	}
-	if err := s.Start(); err != nil {
-		return nil, err
-	}
-
-	c := tailscale.NewClient("-", nil)
-	c.UserAgent = "tailscale-tsnet"
-	c.HTTPClient = &http.Client{Transport: s.lb.KeyProvingNoiseRoundTripper()}
-	return c, nil
-}
-
 // Listen announces only on the Tailscale network.
 // It will start the server if it has not been started yet.
 //
@@ -949,7 +1103,42 @@ func (s *Server) ListenPacket(network, addr string) (net.PacketConn, error) {
 	if err := s.Start(); err != nil {
 		return nil, err
 	}
-	return s.netstack.ListenPacket(network, ap.String())
+
+	// Create the gVisor PacketConn first so it can handle port 0 allocation.
+	pc, err := s.netstack.ListenPacket(network, ap.String())
+	if err != nil {
+		return nil, err
+	}
+
+	// If port 0 was requested, use the port gVisor assigned.
+	if ap.Port() == 0 {
+		if p := portFromAddr(pc.LocalAddr()); p != 0 {
+			ap = netip.AddrPortFrom(ap.Addr(), p)
+			addr = ap.String()
+		}
+	}
+
+	ln, err := s.registerListener(network, addr, ap, listenOnTailnet, nil)
+	if err != nil {
+		pc.Close()
+		return nil, err
+	}
+
+	return &udpPacketConn{
+		PacketConn: pc,
+		ln:         ln,
+	}, nil
+}
+
+// udpPacketConn wraps a net.PacketConn to unregister from s.listeners on Close.
+type udpPacketConn struct {
+	net.PacketConn
+	ln *listener
+}
+
+func (c *udpPacketConn) Close() error {
+	c.ln.Close()
+	return c.PacketConn.Close()
 }
 
 // ListenTLS announces only on the Tailscale network.
@@ -1003,9 +1192,6 @@ func (s *Server) RegisterFallbackTCPHandler(cb FallbackTCPHandler) func() {
 // It calls GetCertificate on the localClient, passing in the ClientHelloInfo.
 // For testing, if s.getCertForTesting is set, it will call that instead.
 func (s *Server) getCert(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if s.getCertForTesting != nil {
-		return s.getCertForTesting(hi)
-	}
 	lc, err := s.LocalClient()
 	if err != nil {
 		return nil, err
@@ -1018,13 +1204,33 @@ type FunnelOption interface {
 	funnelOption()
 }
 
-type funnelOnly int
+type funnelOnly struct{}
 
 func (funnelOnly) funnelOption() {}
 
 // FunnelOnly configures the listener to only respond to connections from Tailscale Funnel.
 // The local tailnet will not be able to connect to the listener.
-func FunnelOnly() FunnelOption { return funnelOnly(1) }
+func FunnelOnly() FunnelOption { return funnelOnly{} }
+
+type funnelTLSConfig struct{ conf *tls.Config }
+
+func (f funnelTLSConfig) funnelOption() {}
+
+// FunnelTLSConfig configures the TLS configuration for [Server.ListenFunnel]
+//
+// This is rarely needed but can permit requiring client certificates, specific
+// ciphers suites, etc.
+//
+// The provided conf should at least be able to get a certificate, setting
+// GetCertificate, Certificates or GetConfigForClient appropriately.
+// The most common configuration is to set GetCertificate to
+// Server.LocalClient's GetCertificate method.
+//
+// Unless [FunnelOnly] is also used, the configuration is also used for
+// in-tailnet connections that don't arrive over Funnel.
+func FunnelTLSConfig(conf *tls.Config) FunnelOption {
+	return funnelTLSConfig{conf: conf}
+}
 
 // ListenFunnel announces on the public internet using Tailscale Funnel.
 //
@@ -1057,6 +1263,26 @@ func (s *Server) ListenFunnel(network, addr string, opts ...FunnelOption) (net.L
 		return nil, err
 	}
 
+	// Process, validate opts.
+	lnOn := listenOnBoth
+	var tlsConfig *tls.Config
+	for _, opt := range opts {
+		switch v := opt.(type) {
+		case funnelTLSConfig:
+			if v.conf == nil {
+				return nil, errors.New("invalid nil FunnelTLSConfig")
+			}
+			tlsConfig = v.conf
+		case funnelOnly:
+			lnOn = listenOnFunnel
+		default:
+			return nil, fmt.Errorf("unknown opts FunnelOption type %T", v)
+		}
+	}
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{GetCertificate: s.getCert}
+	}
+
 	ctx := context.Background()
 	st, err := s.Up(ctx)
 	if err != nil {
@@ -1085,28 +1311,290 @@ func (s *Server) ListenFunnel(network, addr string, opts ...FunnelOption) (net.L
 	}
 	domain := st.CertDomains[0]
 	hp := ipn.HostPort(domain + ":" + portStr)
+	var cleanupOnClose func() error
 	if !srvConfig.AllowFunnel[hp] {
 		mak.Set(&srvConfig.AllowFunnel, hp, true)
 		srvConfig.AllowFunnel[hp] = true
 		if err := lc.SetServeConfig(ctx, srvConfig); err != nil {
 			return nil, err
 		}
+		cleanupOnClose = func() error {
+			sc, err := lc.GetServeConfig(ctx)
+			if err != nil {
+				return fmt.Errorf("cleaning config changes: %w", err)
+			}
+			if sc.AllowFunnel != nil {
+				delete(sc.AllowFunnel, hp)
+			}
+			if err := lc.SetServeConfig(ctx, sc); err != nil {
+				return fmt.Errorf("cleaning config changes: %w", err)
+			}
+			return nil
+		}
 	}
 
 	// Start a funnel listener.
-	lnOn := listenOnBoth
-	for _, opt := range opts {
-		if _, ok := opt.(funnelOnly); ok {
-			lnOn = listenOnFunnel
-		}
-	}
 	ln, err := s.listen(network, addr, lnOn)
 	if err != nil {
 		return nil, err
 	}
-	return tls.NewListener(ln, &tls.Config{
-		GetCertificate: s.getCert,
-	}), nil
+	ln = &cleanupListener{Listener: ln, cleanup: cleanupOnClose}
+	return tls.NewListener(ln, tlsConfig), nil
+}
+
+// ServiceMode defines how a Service is run. Currently supported modes are:
+//   - [ServiceModeTCP]
+//   - [ServiceModeHTTP]
+//
+// For more information, see [Server.ListenService].
+type ServiceMode interface {
+	// network is the network this Service will advertise on. Per Go convention,
+	// this should be lowercase, e.g. 'tcp'.
+	network() string
+}
+
+// serviceModeWithPort is a convenience type to extract the port from
+// ServiceMode types which have one.
+type serviceModeWithPort interface {
+	ServiceMode
+	port() uint16
+}
+
+// ServiceModeTCP is used to configure a TCP Service via [Server.ListenService].
+type ServiceModeTCP struct {
+	// Port is the TCP port to advertise. If this Service needs to advertise
+	// multiple ports, call ListenService multiple times.
+	Port uint16
+
+	// TerminateTLS means that TLS connections will be terminated before being
+	// forwarded to the listener. In this case, the only server name indicator
+	// (SNI) permitted is the Service's fully-qualified domain name.
+	TerminateTLS bool
+
+	// PROXYProtocolVersion indicates whether to send a PROXY protocol header
+	// before forwarding the connection to the listener and which version of the
+	// protocol to use.
+	//
+	// For more information, see
+	// https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
+	PROXYProtocolVersion int
+}
+
+func (ServiceModeTCP) network() string { return "tcp" }
+
+func (m ServiceModeTCP) port() uint16 { return m.Port }
+
+// ServiceModeHTTP is used to configure an HTTP Service via
+// [Server.ListenService].
+type ServiceModeHTTP struct {
+	// Port is the TCP port to advertise. If this Service needs to advertise
+	// multiple ports, call ListenService multiple times.
+	Port uint16
+
+	// HTTPS, if true, means that the listener should handle connections as
+	// HTTPS connections. In this case, the only server name indicator (SNI)
+	// permitted is the Service's fully-qualified domain name.
+	HTTPS bool
+
+	// AcceptAppCaps defines the app capabilities to forward to the server. The
+	// keys in this map are the mount points for each set of capabilities.
+	//
+	// By example,
+	//
+	//  AcceptAppCaps: map[string][]string{
+	// 	  "/":    {"example.com/cap/all-paths"},
+	// 	  "/foo": {"example.com/cap/all-paths", "example.com/cap/foo"},
+	//  }
+	//
+	// would forward example.com/cap/all-paths to all paths on the server and
+	// example.com/cap/foo only to paths beginning with /foo.
+	//
+	// For more information on app capabilities, see
+	// https://tailscale.com/kb/1537/grants-app-capabilities
+	AcceptAppCaps map[string][]string
+
+	// PROXYProtocolVersion indicates whether to send a PROXY protocol header
+	// before forwarding the connection to the listener and which version of the
+	// protocol to use.
+	//
+	// For more information, see
+	// https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
+	PROXYProtocol int
+}
+
+func (ServiceModeHTTP) network() string { return "tcp" }
+
+func (m ServiceModeHTTP) port() uint16 { return m.Port }
+
+func (m ServiceModeHTTP) capsMap() map[string][]tailcfg.PeerCapability {
+	capsMap := map[string][]tailcfg.PeerCapability{}
+	for path, capNames := range m.AcceptAppCaps {
+		caps := make([]tailcfg.PeerCapability, 0, len(capNames))
+		for _, c := range capNames {
+			caps = append(caps, tailcfg.PeerCapability(c))
+		}
+		capsMap[path] = caps
+	}
+	return capsMap
+}
+
+// A ServiceListener is a network listener for a Tailscale Service. For more
+// information about Services, see
+// https://tailscale.com/kb/1552/tailscale-services
+type ServiceListener struct {
+	net.Listener
+	addr addr
+
+	// FQDN is the fully-qualifed domain name of this Service.
+	FQDN string
+}
+
+// Addr returns the listener's network address. This will be the Service's
+// fully-qualified domain name (FQDN) and the port.
+//
+// A hostname is not truly a network address, but Services listen on multiple
+// addresses (the IPv4 and IPv6 virtual IPs).
+func (sl ServiceListener) Addr() net.Addr {
+	return sl.addr
+}
+
+// ErrUntaggedServiceHost is returned by ListenService when run on a node
+// without any ACL tags. A node must use a tag-based identity to act as a
+// Service host. For more information, see:
+// https://tailscale.com/kb/1552/tailscale-services#prerequisites
+var ErrUntaggedServiceHost = errors.New("service hosts must be tagged nodes")
+
+// ListenService creates a network listener for a Tailscale Service. This will
+// advertise this node as hosting the Service. Note that:
+//   - Approval must still be granted by an admin or by ACL auto-approval rules.
+//   - Service hosts must be tagged nodes.
+//   - A valid Service host must advertise all ports defined for the Service.
+//
+// To advertise a Service with multiple ports, run ListenService multiple times.
+// For more information about Services, see
+// https://tailscale.com/kb/1552/tailscale-services
+//
+// This function will start the server if it is not already started.
+func (s *Server) ListenService(name string, mode ServiceMode) (*ServiceListener, error) {
+	if err := tailcfg.ServiceName(name).Validate(); err != nil {
+		return nil, err
+	}
+	if mode == nil {
+		return nil, errors.New("mode may not be nil")
+	}
+	svcName := name
+
+	// TODO(hwh33,tailscale/corp#35859): support TUN mode
+
+	ctx := context.Background()
+	_, err := s.Up(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	st := s.lb.StatusWithoutPeers()
+	if st.Self.Tags == nil || st.Self.Tags.Len() == 0 {
+		return nil, ErrUntaggedServiceHost
+	}
+
+	advertisedServices := s.lb.Prefs().AdvertiseServices().AsSlice()
+	if !slices.Contains(advertisedServices, svcName) {
+		// TODO(hwh33,tailscale/corp#35860): clean these prefs up when (a) we
+		// exit early due to error or (b) when the returned listener is closed.
+		_, err = s.lb.EditPrefs(&ipn.MaskedPrefs{
+			AdvertiseServicesSet: true,
+			Prefs: ipn.Prefs{
+				AdvertiseServices: append(advertisedServices, svcName),
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("updating advertised Services: %w", err)
+		}
+	}
+
+	srvConfig := new(ipn.ServeConfig)
+	sc, srvConfigETag, err := s.lb.ServeConfigETag()
+	if err != nil {
+		return nil, fmt.Errorf("fetching current serve config: %w", err)
+	}
+	if sc.Valid() {
+		srvConfig = sc.AsStruct()
+	}
+
+	fqdn := tailcfg.ServiceName(svcName).WithoutPrefix() + "." + st.CurrentTailnet.MagicDNSSuffix
+
+	// svcAddr is used to implement Addr() on the returned listener.
+	svcAddr := addr{
+		network: mode.network(),
+		// A hostname is not a network address, but Services listen on
+		// multiple addresses (the IPv4 and IPv6 virtual IPs), and there's
+		// no clear winner here between the two. Therefore prefer the FQDN.
+		//
+		// In the case of TCP or HTTP Services, the port will be added below.
+		addr: fqdn,
+	}
+	if m, ok := mode.(serviceModeWithPort); ok {
+		if m.port() == 0 {
+			return nil, errors.New("must specify a port to advertise")
+		}
+		svcAddr.addr += ":" + strconv.Itoa(int(m.port()))
+	}
+
+	// Start listening on a local TCP socket.
+	ln, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		return nil, fmt.Errorf("starting local listener: %w", err)
+	}
+
+	switch m := mode.(type) {
+	case ServiceModeTCP:
+		// Forward all connections from service-hostname:port to our socket.
+		srvConfig.SetTCPForwardingForService(
+			m.Port, ln.Addr().String(), m.TerminateTLS,
+			tailcfg.ServiceName(svcName), m.PROXYProtocolVersion, st.CurrentTailnet.MagicDNSSuffix)
+	case ServiceModeHTTP:
+		// For HTTP Services, proxy all connections to our socket.
+		mds := st.CurrentTailnet.MagicDNSSuffix
+		haveRootHandler := false
+		// We need to add a separate proxy for each mount point in the caps map.
+		for path, caps := range m.capsMap() {
+			if !strings.HasPrefix(path, "/") {
+				path = "/" + path
+			}
+			h := ipn.HTTPHandler{
+				AcceptAppCaps: caps,
+				Proxy:         ln.Addr().String(),
+			}
+			if path == "/" {
+				haveRootHandler = true
+			} else {
+				h.Proxy += path
+			}
+			srvConfig.SetWebHandler(&h, svcName, m.Port, path, m.HTTPS, mds)
+		}
+		// We always need a root handler.
+		if !haveRootHandler {
+			h := ipn.HTTPHandler{Proxy: ln.Addr().String()}
+			srvConfig.SetWebHandler(&h, svcName, m.Port, "/", m.HTTPS, mds)
+		}
+	default:
+		ln.Close()
+		return nil, fmt.Errorf("unknown ServiceMode type %T", m)
+	}
+
+	if err := s.lb.SetServeConfig(srvConfig, srvConfigETag); err != nil {
+		ln.Close()
+		return nil, err
+	}
+
+	// TODO(hwh33,tailscale/corp#35860): clean up state (advertising prefs,
+	// serve config changes) when the returned listener is closed.
+
+	return &ServiceListener{
+		Listener: ln,
+		FQDN:     fqdn,
+		addr:     svcAddr,
+	}, nil
 }
 
 type listenOn string
@@ -1145,6 +1633,11 @@ func resolveListenAddr(network, addr string) (netip.AddrPort, error) {
 	if err != nil {
 		return zero, fmt.Errorf("invalid Listen addr %q; host part must be empty or IP literal", host)
 	}
+	// Normalize unspecified addresses (0.0.0.0, ::) to the zero value,
+	// equivalent to an empty host, so they match the node's own IPs.
+	if bindHostOrZero.IsUnspecified() {
+		return netip.AddrPortFrom(netip.Addr{}, uint16(port)), nil
+	}
 	if strings.HasSuffix(network, "4") && !bindHostOrZero.Is4() {
 		return zero, fmt.Errorf("invalid non-IPv4 addr %v for network %q", host, network)
 	}
@@ -1153,6 +1646,17 @@ func resolveListenAddr(network, addr string) (netip.AddrPort, error) {
 	}
 	return netip.AddrPortFrom(bindHostOrZero, uint16(port)), nil
 }
+
+// ephemeral port range for non-TUN listeners requesting port 0. This range is
+// chosen to reduce the probability of collision with host listeners, avoiding
+// both the typical ephemeral range, and privilege listener ranges. Collisions
+// may still occur and could for example shadow host sockets in a netstack+TUN
+// situation, the range here is a UX improvement, not a guarantee that
+// application authors will never have to consider these cases.
+const (
+	ephemeralPortFirst = 10002
+	ephemeralPortLast  = 19999
+)
 
 func (s *Server) listen(network, addr string, lnOn listenOn) (net.Listener, error) {
 	switch network {
@@ -1167,6 +1671,76 @@ func (s *Server) listen(network, addr string, lnOn listenOn) (net.Listener, erro
 	if err := s.Start(); err != nil {
 		return nil, err
 	}
+
+	isTCP := network == "" || network == "tcp" || network == "tcp4" || network == "tcp6"
+
+	// When using a TUN with TCP, create a gVisor TCP listener.
+	// gVisor handles port 0 allocation natively.
+	var gonetLn net.Listener
+	if s.Tun != nil && isTCP {
+		gonetLn, err = s.listenTCP(network, host)
+		if err != nil {
+			return nil, err
+		}
+		// If port 0 was requested, update host to the port gVisor assigned
+		// so that the listenKey uses the real port.
+		if host.Port() == 0 {
+			if p := portFromAddr(gonetLn.Addr()); p != 0 {
+				host = netip.AddrPortFrom(host.Addr(), p)
+				addr = listenAddr(host)
+			}
+		}
+	}
+
+	ln, err := s.registerListener(network, addr, host, lnOn, gonetLn)
+	if err != nil {
+		if gonetLn != nil {
+			gonetLn.Close()
+		}
+		return nil, err
+	}
+	return ln, nil
+}
+
+// listenTCP creates a gVisor TCP listener for TUN mode.
+func (s *Server) listenTCP(network string, host netip.AddrPort) (net.Listener, error) {
+	var nsNetwork string
+	nsAddr := host
+	switch {
+	case network == "tcp4" || network == "tcp6":
+		nsNetwork = network
+	case host.Addr().Is4():
+		nsNetwork = "tcp4"
+	case host.Addr().Is6():
+		nsNetwork = "tcp6"
+	default:
+		// Wildcard address: use tcp6 for dual-stack (accepts both v4 and v6).
+		nsNetwork = "tcp6"
+		nsAddr = netip.AddrPortFrom(netip.IPv6Unspecified(), host.Port())
+	}
+	ln, err := s.netstack.ListenTCP(nsNetwork, nsAddr.String())
+	if err != nil {
+		return nil, fmt.Errorf("tsnet: %w", err)
+	}
+	return ln, nil
+}
+
+// registerListener allocates a port (if 0) and registers the listener in
+// s.listeners under s.mu.
+func (s *Server) registerListener(network, addr string, host netip.AddrPort, lnOn listenOn, gonetLn net.Listener) (*listener, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Allocate an ephemeral port for non-TUN listeners requesting port 0.
+	if host.Port() == 0 && gonetLn == nil {
+		p, ok := s.allocEphemeralLocked(network, host.Addr(), lnOn)
+		if !ok {
+			return nil, errors.New("tsnet: no available port in ephemeral range")
+		}
+		host = netip.AddrPortFrom(host.Addr(), p)
+		addr = listenAddr(host)
+	}
+
 	var keys []listenKey
 	switch lnOn {
 	case listenOnTailnet:
@@ -1178,19 +1752,19 @@ func (s *Server) listen(network, addr string, lnOn listenOn) (net.Listener, erro
 		keys = append(keys, listenKey{network, host.Addr(), host.Port(), true})
 	}
 
-	ln := &listener{
-		s:    s,
-		keys: keys,
-		addr: addr,
-
-		conn: make(chan net.Conn),
-	}
-	s.mu.Lock()
 	for _, key := range keys {
 		if _, ok := s.listeners[key]; ok {
-			s.mu.Unlock()
 			return nil, fmt.Errorf("tsnet: listener already open for %s, %s", network, addr)
 		}
+	}
+
+	ln := &listener{
+		s:       s,
+		keys:    keys,
+		addr:    addr,
+		closedc: make(chan struct{}),
+		conn:    make(chan net.Conn),
+		gonetLn: gonetLn,
 	}
 	if s.listeners == nil {
 		s.listeners = make(map[listenKey]*listener)
@@ -1198,8 +1772,77 @@ func (s *Server) listen(network, addr string, lnOn listenOn) (net.Listener, erro
 	for _, key := range keys {
 		s.listeners[key] = ln
 	}
-	s.mu.Unlock()
 	return ln, nil
+}
+
+// allocEphemeralLocked finds an unused port in [ephemeralPortFirst,
+// ephemeralPortLast] that does not collide with any existing listener for the
+// given network, host, and listenOn. s.mu must be held.
+func (s *Server) allocEphemeralLocked(network string, host netip.Addr, lnOn listenOn) (uint16, bool) {
+	if s.nextEphemeralPort < ephemeralPortFirst || s.nextEphemeralPort > ephemeralPortLast {
+		s.nextEphemeralPort = ephemeralPortFirst
+	}
+	start := s.nextEphemeralPort
+	for {
+		p := s.nextEphemeralPort
+		s.nextEphemeralPort++
+		if s.nextEphemeralPort > ephemeralPortLast {
+			s.nextEphemeralPort = ephemeralPortFirst
+		}
+		if !s.portInUseLocked(network, host, p, lnOn) {
+			return p, true
+		}
+		if s.nextEphemeralPort == start {
+			return 0, false
+		}
+	}
+}
+
+// portInUseLocked reports whether any listenKey for the given network, host,
+// port, and listenOn already exists in s.listeners.
+func (s *Server) portInUseLocked(network string, host netip.Addr, port uint16, lnOn listenOn) bool {
+	switch lnOn {
+	case listenOnTailnet:
+		_, ok := s.listeners[listenKey{network, host, port, false}]
+		return ok
+	case listenOnFunnel:
+		_, ok := s.listeners[listenKey{network, host, port, true}]
+		return ok
+	case listenOnBoth:
+		_, ok1 := s.listeners[listenKey{network, host, port, false}]
+		_, ok2 := s.listeners[listenKey{network, host, port, true}]
+		return ok1 || ok2
+	}
+	return false
+}
+
+// listenAddr formats host as a listen address string.
+// If host has no IP, it returns ":port".
+func listenAddr(host netip.AddrPort) string {
+	if !host.Addr().IsValid() {
+		return ":" + strconv.Itoa(int(host.Port()))
+	}
+	return host.String()
+}
+
+// portFromAddr extracts the port from a net.Addr, or returns 0.
+func portFromAddr(a net.Addr) uint16 {
+	switch v := a.(type) {
+	case *net.TCPAddr:
+		return uint16(v.Port)
+	case *net.UDPAddr:
+		return uint16(v.Port)
+	}
+	if ap, err := netip.ParseAddrPort(a.String()); err == nil {
+		return ap.Port()
+	}
+	return 0
+}
+
+// GetRootPath returns the root path of the tsnet server.
+// This is where the state file and other data is stored.
+func (s *Server) GetRootPath() string {
+	return s.rootPath
 }
 
 // CapturePcap can be called by the application code compiled with tsnet to save a pcap
@@ -1246,22 +1889,40 @@ type listenKey struct {
 }
 
 type listener struct {
-	s      *Server
-	keys   []listenKey
-	addr   string
-	conn   chan net.Conn
-	closed bool // guarded by s.mu
+	s       *Server
+	keys    []listenKey
+	addr    string
+	conn    chan net.Conn // unbuffered, never closed
+	closedc chan struct{} // closed on [listener.Close]
+	closed  bool          // guarded by s.mu
+
+	// gonetLn, if set, is the gonet.Listener that handles new connections.
+	// gonetLn is set by [listen] when a TUN is in use and terminates the listener.
+	// gonetLn is nil when TUN is nil.
+	gonetLn net.Listener
 }
 
 func (ln *listener) Accept() (net.Conn, error) {
-	c, ok := <-ln.conn
-	if !ok {
+	if ln.gonetLn != nil {
+		return ln.gonetLn.Accept()
+	}
+	select {
+	case c := <-ln.conn:
+		return c, nil
+	case <-ln.closedc:
 		return nil, fmt.Errorf("tsnet: %w", net.ErrClosed)
 	}
-	return c, nil
 }
 
-func (ln *listener) Addr() net.Addr { return addr{ln} }
+func (ln *listener) Addr() net.Addr {
+	if ln.gonetLn != nil {
+		return ln.gonetLn.Addr()
+	}
+	return addr{
+		network: ln.keys[0].network,
+		addr:    ln.addr,
+	}
+}
 
 func (ln *listener) Close() error {
 	ln.s.mu.Lock()
@@ -1280,27 +1941,50 @@ func (ln *listener) closeLocked() error {
 			delete(ln.s.listeners, key)
 		}
 	}
-	close(ln.conn)
+	close(ln.closedc)
 	ln.closed = true
+	if ln.gonetLn != nil {
+		ln.gonetLn.Close()
+	}
 	return nil
 }
 
 func (ln *listener) handle(c net.Conn) {
-	t := time.NewTimer(time.Second)
-	defer t.Stop()
 	select {
 	case ln.conn <- c:
-	case <-t.C:
+		return
+	case <-ln.closedc:
+	case <-ln.s.shutdownCtx.Done():
+	case <-time.After(time.Second):
 		// TODO(bradfitz): this isn't ideal. Think about how
 		// we how we want to do pushback.
-		c.Close()
 	}
+	c.Close()
 }
 
 // Server returns the tsnet Server associated with the listener.
 func (ln *listener) Server() *Server { return ln.s }
 
-type addr struct{ ln *listener }
+type addr struct {
+	network, addr string
+}
 
-func (a addr) Network() string { return a.ln.keys[0].network }
-func (a addr) String() string  { return a.ln.addr }
+func (a addr) Network() string { return a.network }
+func (a addr) String() string  { return a.addr }
+
+// cleanupListener wraps a net.Listener with a function to be run on Close.
+type cleanupListener struct {
+	net.Listener
+	cleanupOnce sync.Once
+	cleanup     func() error // nil if unused
+}
+
+func (cl *cleanupListener) Close() error {
+	var cleanupErr error
+	cl.cleanupOnce.Do(func() {
+		if cl.cleanup != nil {
+			cleanupErr = cl.cleanup()
+		}
+	})
+	return errors.Join(cl.Listener.Close(), cleanupErr)
+}

@@ -26,10 +26,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/consts"
+	"github.com/compose-spec/compose-go/v2/errdefs"
 	interp "github.com/compose-spec/compose-go/v2/interpolation"
 	"github.com/compose-spec/compose-go/v2/override"
 	"github.com/compose-spec/compose-go/v2/paths"
@@ -41,8 +43,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/validation"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/exp/slices"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Options supported by Load
@@ -77,12 +78,23 @@ type Options struct {
 	projectNameImperativelySet bool
 	// Profiles set profiles to enable
 	Profiles []string
+	// SelectedServices restricts the project model to these services (and their dependencies)
+	// after parsing. An empty slice means "all services". When set, services not in the list
+	// are dropped from the project before environment resolution, so their env_file / label_file
+	// entries are not loaded.
+	SelectedServices []string
+	// PruneUnnecessaryResources drops networks/volumes/secrets/configs/models that are not
+	// referenced by active services after service selection.
+	PruneUnnecessaryResources bool
 	// ResourceLoaders manages support for remote resources
 	ResourceLoaders []ResourceLoader
 	// KnownExtensions manages x-* attribute we know and the corresponding go structs
 	KnownExtensions map[string]any
 	// Metada for telemetry
 	Listeners []Listener
+	// MaxNodeVisits caps total YAML node visits during reset/override resolution.
+	// Zero means use the default. Useful for very large compose files that exceed the default cap.
+	MaxNodeVisits int
 }
 
 var versionWarning []string
@@ -139,9 +151,9 @@ func (l localResourceLoader) abs(p string) string {
 	return filepath.Join(l.WorkingDir, p)
 }
 
-func (l localResourceLoader) Accept(p string) bool {
-	_, err := os.Stat(l.abs(p))
-	return err == nil
+func (l localResourceLoader) Accept(_ string) bool {
+	// LocalResourceLoader is the last loader tested so it always should accept the config and try to get the content.
+	return true
 }
 
 func (l localResourceLoader) Load(_ context.Context, p string) (string, error) {
@@ -183,6 +195,8 @@ func (o *Options) clone() *Options {
 		projectName:                o.projectName,
 		projectNameImperativelySet: o.projectNameImperativelySet,
 		Profiles:                   o.Profiles,
+		SelectedServices:           o.SelectedServices,
+		PruneUnnecessaryResources:  o.PruneUnnecessaryResources,
 		ResourceLoaders:            o.ResourceLoaders,
 		KnownExtensions:            o.KnownExtensions,
 		Listeners:                  o.Listeners,
@@ -256,76 +270,105 @@ func WithProfiles(profiles []string) func(*Options) {
 	}
 }
 
-// ParseYAML reads the bytes from a file, parses the bytes into a mapping
-// structure, and returns it.
-func ParseYAML(source []byte) (map[string]interface{}, error) {
-	r := bytes.NewReader(source)
-	decoder := yaml.NewDecoder(r)
-	m, _, err := parseYAML(decoder)
-	return m, err
+// WithSelectedServices restricts the loaded project to the given services and their
+// dependencies. An empty slice means "all services". When set, services not in the
+// list are dropped from the project before environment resolution: their `env_file`
+// and `label_file` entries will not be loaded from disk.
+func WithSelectedServices(services []string) func(*Options) {
+	return func(opts *Options) {
+		opts.SelectedServices = services
+	}
+}
+
+// WithoutUnnecessaryResources drops networks/volumes/secrets/configs/models that
+// are not referenced by services remaining after selection.
+func WithoutUnnecessaryResources(opts *Options) {
+	opts.PruneUnnecessaryResources = true
 }
 
 // PostProcessor is used to tweak compose model based on metadata extracted during yaml Unmarshal phase
 // that hardly can be implemented using go-yaml and mapstructure
 type PostProcessor interface {
-	yaml.Unmarshaler
-
 	// Apply changes to compose model based on recorder metadata
 	Apply(interface{}) error
 }
 
-func parseYAML(decoder *yaml.Decoder) (map[string]interface{}, PostProcessor, error) {
-	var cfg interface{}
-	processor := ResetProcessor{target: &cfg}
+type NoopPostProcessor struct{}
 
-	if err := decoder.Decode(&processor); err != nil {
-		return nil, nil, err
+func (NoopPostProcessor) Apply(interface{}) error { return nil }
+
+// LoadConfigFiles ingests config files with ResourceLoader and returns config details with paths to local copies
+func LoadConfigFiles(ctx context.Context, configFiles []string, workingDir string, options ...func(*Options)) (*types.ConfigDetails, error) {
+	if len(configFiles) < 1 {
+		return &types.ConfigDetails{}, fmt.Errorf("no configuration file provided: %w", errdefs.ErrNotFound)
 	}
-	stringMap, ok := cfg.(map[string]interface{})
-	if ok {
-		converted, err := convertToStringKeysRecursive(stringMap, "")
-		if err != nil {
-			return nil, nil, err
+
+	opts := &Options{}
+	config := &types.ConfigDetails{
+		ConfigFiles: make([]types.ConfigFile, len(configFiles)),
+	}
+
+	for _, op := range options {
+		op(opts)
+	}
+	opts.ResourceLoaders = append(opts.ResourceLoaders, localResourceLoader{})
+
+	for i, p := range configFiles {
+		if p == "-" {
+			config.ConfigFiles[i] = types.ConfigFile{
+				Filename: p,
+			}
+			continue
 		}
-		return converted.(map[string]interface{}), &processor, nil
-	}
-	cfgMap, ok := cfg.(map[interface{}]interface{})
-	if !ok {
-		return nil, nil, errors.New("Top-level object must be a mapping")
-	}
-	converted, err := convertToStringKeysRecursive(cfgMap, "")
-	if err != nil {
-		return nil, nil, err
-	}
-	return converted.(map[string]interface{}), &processor, nil
-}
 
-// Load reads a ConfigDetails and returns a fully loaded configuration.
-// Deprecated: use LoadWithContext.
-func Load(configDetails types.ConfigDetails, options ...func(*Options)) (*types.Project, error) {
-	return LoadWithContext(context.Background(), configDetails, options...)
+		for _, loader := range opts.ResourceLoaders {
+			_, isLocalResourceLoader := loader.(localResourceLoader)
+			if !loader.Accept(p) {
+				continue
+			}
+			local, err := loader.Load(ctx, p)
+			if err != nil {
+				return nil, err
+			}
+			if config.WorkingDir == "" && !isLocalResourceLoader {
+				config.WorkingDir = filepath.Dir(local)
+			}
+			abs, err := filepath.Abs(local)
+			if err != nil {
+				abs = local
+			}
+			config.ConfigFiles[i] = types.ConfigFile{
+				Filename: abs,
+			}
+			break
+		}
+	}
+	if config.WorkingDir == "" {
+		config.WorkingDir = workingDir
+	}
+	return config, nil
 }
 
 // LoadWithContext reads a ConfigDetails and returns a fully loaded configuration as a compose-go Project
 func LoadWithContext(ctx context.Context, configDetails types.ConfigDetails, options ...func(*Options)) (*types.Project, error) {
-	opts := toOptions(&configDetails, options)
+	opts := ToOptions(&configDetails, options)
 	dict, err := loadModelWithContext(ctx, &configDetails, opts)
 	if err != nil {
 		return nil, err
 	}
-	return modelToProject(dict, opts, configDetails)
+	return ModelToProject(dict, opts, configDetails)
 }
 
 // LoadModelWithContext reads a ConfigDetails and returns a fully loaded configuration as a yaml dictionary
 func LoadModelWithContext(ctx context.Context, configDetails types.ConfigDetails, options ...func(*Options)) (map[string]any, error) {
-	opts := toOptions(&configDetails, options)
+	opts := ToOptions(&configDetails, options)
 	return loadModelWithContext(ctx, &configDetails, opts)
 }
 
 // LoadModelWithContext reads a ConfigDetails and returns a fully loaded configuration as a yaml dictionary
 func loadModelWithContext(ctx context.Context, configDetails *types.ConfigDetails, opts *Options) (map[string]any, error) {
 	if len(configDetails.ConfigFiles) < 1 {
-		return nil, errors.New("No files specified")
+		return nil, errors.New("no compose file specified")
 	}
 
 	err := projectName(configDetails, opts)
@@ -336,7 +379,7 @@ func loadModelWithContext(ctx context.Context, configDetails *types.ConfigDetail
 	return load(ctx, *configDetails, opts, nil)
 }
 
-func toOptions(configDetails *types.ConfigDetails, options []func(*Options)) *Options {
+func ToOptions(configDetails *types.ConfigDetails, options []func(*Options)) *Options {
 	opts := &Options{
 		Interpolate: &interp.Options{
 			Substitute:      template.Substitute,
@@ -395,7 +438,15 @@ func loadYamlModel(ctx context.Context, config types.ConfigDetails, opts *Option
 	return dict, nil
 }
 
-func loadYamlFile(ctx context.Context, file types.ConfigFile, opts *Options, workingDir string, environment types.Mapping, ct *cycleTracker, dict map[string]interface{}, included []string) (map[string]interface{}, PostProcessor, error) {
+func loadYamlFile(ctx context.Context,
+	file types.ConfigFile,
+	opts *Options,
+	workingDir string,
+	environment types.Mapping,
+	ct *cycleTracker,
+	dict map[string]interface{},
+	included []string,
+) (map[string]interface{}, PostProcessor, error) {
 	ctx = context.WithValue(ctx, consts.ComposeFileKey{}, file.Filename)
 	if file.Content == nil && file.Config == nil {
 		content, err := os.ReadFile(file.Filename)
@@ -405,14 +456,14 @@ func loadYamlFile(ctx context.Context, file types.ConfigFile, opts *Options, wor
 		file.Content = content
 	}
 
-	processRawYaml := func(raw interface{}, processors ...PostProcessor) error {
+	processRawYaml := func(raw interface{}, processor PostProcessor) error {
 		converted, err := convertToStringKeysRecursive(raw, "")
 		if err != nil {
 			return err
 		}
 		cfg, ok := converted.(map[string]interface{})
 		if !ok {
-			return errors.New("Top-level object must be a mapping")
+			return errors.New("top-level object must be a mapping")
 		}
 
 		if opts.Interpolate != nil && !opts.SkipInterpolation {
@@ -424,25 +475,26 @@ func loadYamlFile(ctx context.Context, file types.ConfigFile, opts *Options, wor
 
 		fixEmptyNotNull(cfg)
 
-		if !opts.SkipExtends {
-			err = ApplyExtends(ctx, cfg, opts, ct, processors...)
-			if err != nil {
-				return err
-			}
-		}
-
-		for _, processor := range processors {
-			if err := processor.Apply(dict); err != nil {
-				return err
-			}
-		}
-
+		// Process includes first so that extended services have all merged attributes
 		if !opts.SkipInclude {
 			included = append(included, file.Filename)
-			err = ApplyInclude(ctx, workingDir, environment, cfg, opts, included)
+			err = ApplyInclude(ctx, workingDir, environment, cfg, opts, included, processor)
 			if err != nil {
 				return err
 			}
+		}
+
+		if err := processor.Apply(dict); err != nil {
+			return err
+		}
+
+		// Process extends after includes so base services are fully merged
+		if !opts.SkipExtends {
+			err = ApplyExtends(ctx, cfg, opts, ct, processor)
+			if err != nil {
+				return err
+			}
+
 		}
 
 		dict, err = override.Merge(dict, cfg)
@@ -470,6 +522,8 @@ func loadYamlFile(ctx context.Context, file types.ConfigFile, opts *Options, wor
 			return err
 		}
 
+		dict = OmitEmpty(dict)
+
 		// Canonical transformation can reveal duplicates, typically as ports can be a range and conflict with an override
 		dict, err = override.EnforceUnicity(dict)
 		return err
@@ -481,13 +535,13 @@ func loadYamlFile(ctx context.Context, file types.ConfigFile, opts *Options, wor
 		decoder := yaml.NewDecoder(r)
 		for {
 			var raw interface{}
-			reset := &ResetProcessor{target: &raw}
+			reset := &ResetProcessor{target: &raw, maxNodeVisits: opts.MaxNodeVisits}
 			err := decoder.Decode(reset)
 			if err != nil && errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, fmt.Errorf("failed to parse %s: %w", file.Filename, err)
 			}
 			processor = reset
 			if err := processRawYaml(raw, processor); err != nil {
@@ -495,7 +549,7 @@ func loadYamlFile(ctx context.Context, file types.ConfigFile, opts *Options, wor
 			}
 		}
 	} else {
-		if err := processRawYaml(file.Config); err != nil {
+		if err := processRawYaml(file.Config, NoopPostProcessor{}); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -510,7 +564,6 @@ func load(ctx context.Context, configDetails types.ConfigDetails, opts *Options,
 			return nil, fmt.Errorf("include cycle detected:\n%s\n include %s", loaded[0], strings.Join(loaded[1:], "\n include "))
 		}
 	}
-	loaded = append(loaded, mainFile)
 
 	dict, err := loadYamlModel(ctx, configDetails, opts, &cycleTracker{}, nil)
 	if err != nil {
@@ -521,7 +574,7 @@ func load(ctx context.Context, configDetails types.ConfigDetails, opts *Options,
 		return nil, errors.New("empty compose file")
 	}
 
-	if opts.projectName == "" {
+	if !opts.SkipValidation && opts.projectName == "" {
 		return nil, errors.New("project name must not be empty")
 	}
 
@@ -536,8 +589,8 @@ func load(ctx context.Context, configDetails types.ConfigDetails, opts *Options,
 	return dict, nil
 }
 
-// modelToProject binds a canonical yaml dict into compose-go structs
-func modelToProject(dict map[string]interface{}, opts *Options, configDetails types.ConfigDetails) (*types.Project, error) {
+// ModelToProject binds a canonical yaml dict into compose-go structs
+func ModelToProject(dict map[string]interface{}, opts *Options, configDetails types.ConfigDetails) (*types.Project, error) {
 	project := &types.Project{
 		Name:        opts.projectName,
 		WorkingDir:  configDetails.WorkingDir,
@@ -576,12 +629,36 @@ func modelToProject(dict map[string]interface{}, opts *Options, configDetails ty
 		}
 	}
 
+	if len(opts.SelectedServices) > 0 {
+		// WithServicesEnabled must precede WithSelectedServices: the latter walks
+		// only active services, so any selected service currently sitting in
+		// DisabledServices (e.g. gated by a profile) would otherwise be invisible.
+		project, err = project.WithServicesEnabled(opts.SelectedServices...)
+		if err != nil {
+			return nil, err
+		}
+		project, err = project.WithSelectedServices(opts.SelectedServices)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if opts.PruneUnnecessaryResources {
+		project = project.WithoutUnnecessaryResources()
+	}
+
 	if !opts.SkipResolveEnvironment {
 		project, err = project.WithServicesEnvironmentResolved(opts.discardEnvFiles)
 		if err != nil {
 			return nil, err
 		}
 	}
+
+	project, err = project.WithServicesLabelsResolved(opts.discardEnvFiles)
+	if err != nil {
+		return nil, err
+	}
+
 	return project, nil
 }
 
@@ -659,7 +736,10 @@ func projectName(details *types.ConfigDetails, opts *Options) error {
 		}
 		pjNameFromConfigFile = interpolated["name"].(string)
 	}
-	pjNameFromConfigFile = NormalizeProjectName(pjNameFromConfigFile)
+
+	if !opts.SkipNormalization {
+		pjNameFromConfigFile = NormalizeProjectName(pjNameFromConfigFile)
+	}
 	if pjNameFromConfigFile != "" {
 		opts.projectName = pjNameFromConfigFile
 	}
@@ -675,6 +755,7 @@ func NormalizeProjectName(s string) string {
 
 var userDefinedKeys = []tree.Path{
 	"services",
+	"services.*.depends_on",
 	"volumes",
 	"networks",
 	"secrets",
@@ -687,7 +768,7 @@ func processExtensions(dict map[string]any, p tree.Path, extensions map[string]a
 	for key, value := range dict {
 		skip := false
 		for _, uk := range userDefinedKeys {
-			if uk.Matches(p) {
+			if p.Matches(uk) {
 				skip = true
 				break
 			}
@@ -770,14 +851,14 @@ func secretConfigDecoderHook(from, to reflect.Type, data interface{}) (interface
 	// Check if the input is a map and we're decoding into a SecretConfig
 	if from.Kind() == reflect.Map && to == reflect.TypeOf(types.SecretConfig{}) {
 		if v, ok := data.(map[string]interface{}); ok {
-			if ext, ok := v["#extensions"].(map[string]interface{}); ok {
+			if ext, ok := v[consts.Extensions].(map[string]interface{}); ok {
 				if val, ok := ext[types.SecretConfigXValue].(string); ok {
 					// Return a map with the Content field populated
 					v["Content"] = val
 					delete(ext, types.SecretConfigXValue)
 
 					if len(ext) == 0 {
-						delete(v, "#extensions")
+						delete(v, consts.Extensions)
 					}
 				}
 			}
@@ -849,7 +930,7 @@ func formatInvalidKeyError(keyPrefix string, key interface{}) error {
 	} else {
 		location = fmt.Sprintf("in %s", keyPrefix)
 	}
-	return fmt.Errorf("Non-string key %s: %#v", location, key)
+	return fmt.Errorf("non-string key %s: %#v", location, key)
 }
 
 // Windows path, c:\\my\\path\\shiny, need to be changed to be compatible with

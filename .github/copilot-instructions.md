@@ -11,6 +11,7 @@
 - Go lint: CI runs `golangci-lint run --timeout 30m` with `GOFLAGS=-mod=vendor`.
 - Desktop install/build/checks: from `desktop/`, use `yarn install --frozen-lockfile`, `yarn build`, `yarn lint:ci`, `yarn format:check`, and `yarn types:check`.
 - Desktop app dev/build: from `desktop/`, use `yarn desktop:dev:debug`, `yarn desktop:build`, or `yarn tauri build --config src-tauri/tauri-dev.conf.json`.
+- Rust-only desktop checks may need a CLI resource first: build the CLI, then temporarily copy it to `desktop/src-tauri/bin/devpod-cli-$(rustc -Vv | awk '/host:/ {print $2}')` before running `cargo check` from `desktop/src-tauri/`.
 - Docs: from `docs/`, use `yarn start` and `yarn build`.
 
 ## High-level architecture
@@ -26,7 +27,7 @@
 ## Key conventions
 
 - This repository vendors Go dependencies. Preserve `GOFLAGS=-mod=vendor` when matching CI, and avoid changing vendored code unless explicitly updating dependencies.
-- The canonical Go module declares Go 1.23.1/toolchain 1.23.5, but several GitHub workflows still set up Go 1.21.8; keep compatibility in mind when using newer language features.
+- The canonical Go module declares Go 1.26.3; keep GitHub workflow Go versions in sync when changing the module directive.
 - Errors are generally returned with context using `fmt.Errorf("...: %w", err)` or `github.com/pkg/errors` wrappers; CLI execution centralizes final logging and process exit handling in `cmd.Execute()`.
 - Global CLI flags are created once in `cmd/flags` and passed into commands. Commands should respect `--debug`, `--silent`, `--context`, `--provider`, and `--devpod-home` through the existing `GlobalFlags` plumbing.
 - Provider options often use custom JSON-friendly helper types such as `types.StrBool` and `types.StrArray`; reuse those when adding provider YAML-backed fields.

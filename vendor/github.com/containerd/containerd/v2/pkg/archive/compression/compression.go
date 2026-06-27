@@ -61,7 +61,7 @@ var (
 
 var (
 	bufioReader32KPool = &sync.Pool{
-		New: func() interface{} { return bufio.NewReaderSize(nil, 32*1024) },
+		New: func() any { return bufio.NewReaderSize(nil, 32*1024) },
 	}
 )
 
@@ -220,7 +220,9 @@ func DecompressStream(archive io.Reader) (DecompressReadCloser, error) {
 			},
 		}, nil
 	case Zstd:
-		zstdReader, err := zstd.NewReader(buf)
+		zstdReader, err := zstd.NewReader(buf,
+			zstd.WithDecoderLowmem(false),
+		)
 		if err != nil {
 			return nil, err
 		}

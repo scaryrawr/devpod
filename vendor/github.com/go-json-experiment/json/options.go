@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build !goexperiment.jsonv2 || !go1.25
+
 package json
 
 import (
@@ -61,6 +63,7 @@ import (
 //   - [Deterministic] affects marshaling only
 //   - [FormatNilSliceAsNull] affects marshaling only
 //   - [FormatNilMapAsNull] affects marshaling only
+//   - [OmitZeroStructFields] affects marshaling only
 //   - [MatchCaseInsensitiveNames] affects marshaling and unmarshaling
 //   - [DiscardUnknownMembers] affects marshaling only
 //   - [RejectUnknownMembers] affects unmarshaling only
@@ -74,9 +77,7 @@ type Options = jsonopts.Options
 // Properties set in later options override the value of previously set properties.
 func JoinOptions(srcs ...Options) Options {
 	var dst jsonopts.Struct
-	for _, src := range srcs {
-		dst.Join(src)
-	}
+	dst.Join(srcs...)
 	return &dst
 }
 
@@ -88,27 +89,25 @@ func JoinOptions(srcs ...Options) Options {
 //	v, ok := json.GetOption(opts, json.Deterministic)
 //
 // Options are most commonly introspected to alter the JSON representation of
-// [MarshalerV2.MarshalJSONV2] and [MarshalerV2.MarshalJSONV2] methods, and
-// [MarshalFuncV2] and [UnmarshalFuncV2] functions.
+// [MarshalerTo.MarshalJSONTo] and [UnmarshalerFrom.UnmarshalJSONFrom] methods, and
+// [MarshalToFunc] and [UnmarshalFromFunc] functions.
 // In such cases, the presence bit should generally be ignored.
 func GetOption[T any](opts Options, setter func(T) Options) (T, bool) {
 	return jsonopts.GetOption(opts, setter)
 }
 
 // DefaultOptionsV2 is the full set of all options that define v2 semantics.
-// It is equivalent to all boolean options under [Options],
-// [encoding/json.Options], and [encoding/json/jsontext.Options]
-// being set to false. All non-boolean options are set to the zero value,
-// except for [jsontext.WithIndent], which defaults to "\t".
+// It is equivalent to all options under [Options], [encoding/json.Options],
+// and [encoding/json/jsontext.Options] being set to false or the zero value,
+// except for the options related to whitespace formatting.
 func DefaultOptionsV2() Options {
 	return &jsonopts.DefaultOptionsV2
 }
 
 // StringifyNumbers specifies that numeric Go types should be marshaled
 // as a JSON string containing the equivalent JSON number value.
-// When unmarshaling, numeric Go types can be parsed from either
-// a JSON number or a JSON string containing the JSON number
-// without any surrounding whitespace.
+// When unmarshaling, numeric Go types are parsed from a JSON string
+// containing the JSON number without any surrounding whitespace.
 //
 // According to RFC 8259, section 6, a JSON implementation may choose to
 // limit the representation of a JSON number to an IEEE 754 binary64 value.
@@ -168,9 +167,25 @@ func FormatNilMapAsNull(v bool) Options {
 	}
 }
 
+// OmitZeroStructFields specifies that a Go struct should marshal in such a way
+// that all struct fields that are zero are omitted from the marshaled output
+// if the value is zero as determined by the "IsZero() bool" method if present,
+// otherwise based on whether the field is the zero Go value.
+// This is semantically equivalent to specifying the `omitzero` tag option
+// on every field in a Go struct.
+//
+// This only affects marshaling and is ignored when unmarshaling.
+func OmitZeroStructFields(v bool) Options {
+	if v {
+		return jsonflags.OmitZeroStructFields | 1
+	} else {
+		return jsonflags.OmitZeroStructFields | 0
+	}
+}
+
 // MatchCaseInsensitiveNames specifies that JSON object members are matched
 // against Go struct fields using a case-insensitive match of the name.
-// Go struct fields explicitly marked with `strictcase` or `nocase`
+// Go struct fields explicitly marked with `case:strict` or `case:ignore`
 // always use case-sensitive (or case-insensitive) name matching,
 // regardless of the value of this option.
 //
@@ -242,7 +257,7 @@ func (*unmarshalersOption) JSONOptions(internal.NotForPublicUse) {}
 
 // Inject support into "jsonopts" to handle these types.
 func init() {
-	jsonopts.GetUnknownOption = func(src *jsonopts.Struct, zero jsonopts.Options) (any, bool) {
+	jsonopts.GetUnknownOption = func(src jsonopts.Struct, zero jsonopts.Options) (any, bool) {
 		switch zero.(type) {
 		case *marshalersOption:
 			if !src.Flags.Has(jsonflags.Marshalers) {
@@ -258,7 +273,7 @@ func init() {
 			panic(fmt.Sprintf("unknown option %T", zero))
 		}
 	}
-	jsonopts.JoinUnknownOption = func(dst *jsonopts.Struct, src jsonopts.Options) {
+	jsonopts.JoinUnknownOption = func(dst jsonopts.Struct, src jsonopts.Options) jsonopts.Struct {
 		switch src := src.(type) {
 		case *marshalersOption:
 			dst.Flags.Set(jsonflags.Marshalers | 1)
@@ -269,5 +284,6 @@ func init() {
 		default:
 			panic(fmt.Sprintf("unknown option %T", src))
 		}
+		return dst
 	}
 }

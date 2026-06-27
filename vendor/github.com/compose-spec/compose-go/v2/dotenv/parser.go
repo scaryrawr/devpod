@@ -115,11 +115,11 @@ loop:
 		switch rune {
 		case '=', ':', '\n':
 			// library also supports yaml-style value declaration
-			key = string(src[0:i])
+			key = src[0:i]
 			offset = i + 1
 			inherited = rune == '\n'
 			break loop
-		case '_', '.', '[', ']':
+		case '_', '.', '-', '[', ']':
 		default:
 			// variable name should match [A-Za-z0-9_.-]
 			if unicode.IsLetter(rune) || unicode.IsNumber(rune) {
@@ -134,6 +134,10 @@ loop:
 
 	if src == "" {
 		return "", "", inherited, errors.New("zero length string")
+	}
+
+	if inherited && strings.IndexByte(key, ' ') == -1 {
+		p.line++
 	}
 
 	// trim whitespace
@@ -153,7 +157,7 @@ func (p *parser) extractVarValue(src string, envMap map[string]string, lookupFn 
 		// Remove inline comments on unquoted lines
 		value, _, _ = strings.Cut(value, " #")
 		value = strings.TrimRightFunc(value, unicode.IsSpace)
-		retVal, err := expandVariables(string(value), envMap, lookupFn)
+		retVal, err := expandVariables(value, envMap, lookupFn)
 		return retVal, rest, err
 	}
 

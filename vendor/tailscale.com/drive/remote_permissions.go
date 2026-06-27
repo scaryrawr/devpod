@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 package drive
@@ -32,7 +32,7 @@ type grant struct {
 	Access string
 }
 
-// ParsePermissions builds a Permissions map from a lis of raw grants.
+// ParsePermissions builds a Permissions map from a list of raw grants.
 func ParsePermissions(rawGrants [][]byte) (Permissions, error) {
 	permissions := make(Permissions)
 	for _, rawGrant := range rawGrants {

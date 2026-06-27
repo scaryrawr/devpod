@@ -2,12 +2,16 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build !goexperiment.jsonv2 || !go1.25
+
 package json
 
 import (
+	"cmp"
 	"reflect"
 	"strconv"
 
+	"github.com/go-json-experiment/json/internal"
 	"github.com/go-json-experiment/json/internal/jsonflags"
 	"github.com/go-json-experiment/json/internal/jsonopts"
 	"github.com/go-json-experiment/json/internal/jsonwire"
@@ -19,6 +23,9 @@ import (
 // no knowledge of the JSON schema. This is a common enough occurrence
 // to justify the complexity of adding logic for this.
 
+// marshalValueAny marshals a Go any as a JSON value.
+// This assumes that there are no special formatting directives
+// for any possible nested value.
 func marshalValueAny(enc *jsontext.Encoder, val any, mo *jsonopts.Struct) error {
 	switch val := val.(type) {
 	case nil:
@@ -44,6 +51,10 @@ func marshalValueAny(enc *jsontext.Encoder, val any, mo *jsonopts.Struct) error 
 	}
 }
 
+// unmarshalValueAny unmarshals a JSON value as a Go any.
+// This assumes that there are no special formatting directives
+// for any possible nested value.
+// Duplicate names must be rejected since this does not implement merging.
 func unmarshalValueAny(dec *jsontext.Decoder, uo *jsonopts.Struct) (any, error) {
 	switch k := dec.PeekKind(); k {
 	case '{':
@@ -71,9 +82,12 @@ func unmarshalValueAny(dec *jsontext.Decoder, uo *jsonopts.Struct) (any, error) 
 			}
 			return makeString(xd.StringCache, val), nil
 		case '0':
+			if uo.Flags.Get(jsonflags.UnmarshalAnyWithRawNumber) {
+				return internal.RawNumberOf(val), nil
+			}
 			fv, ok := jsonwire.ParseFloat(val, 64)
-			if !ok && uo.Flags.Get(jsonflags.RejectFloatOverflow) {
-				return nil, &SemanticError{action: "unmarshal", JSONKind: k, GoType: float64Type, Err: strconv.ErrRange}
+			if !ok {
+				return fv, newUnmarshalErrorAfterWithValue(dec, float64Type, strconv.ErrRange)
 			}
 			return fv, nil
 		default:
@@ -82,13 +96,15 @@ func unmarshalValueAny(dec *jsontext.Decoder, uo *jsonopts.Struct) (any, error) 
 	}
 }
 
+// marshalObjectAny marshals a Go map[string]any as a JSON object
+// (or as a JSON null if nil and [jsonflags.FormatNilMapAsNull]).
 func marshalObjectAny(enc *jsontext.Encoder, obj map[string]any, mo *jsonopts.Struct) error {
 	// Check for cycles.
 	xe := export.Encoder(enc)
 	if xe.Tokens.Depth() > startDetectingCyclesAfter {
 		v := reflect.ValueOf(obj)
 		if err := visitPointer(&xe.SeenPointers, v); err != nil {
-			return err
+			return newMarshalErrorBefore(enc, anyType, err)
 		}
 		defer leavePointer(&xe.SeenPointers, v)
 	}
@@ -99,7 +115,7 @@ func marshalObjectAny(enc *jsontext.Encoder, obj map[string]any, mo *jsonopts.St
 			return enc.WriteToken(jsontext.Null)
 		}
 		// Optimize for marshaling an empty map without any preceding whitespace.
-		if !xe.Flags.Get(jsonflags.Expand) && !xe.Tokens.Last.NeedObjectName() {
+		if !mo.Flags.Get(jsonflags.AnyWhitespace) && !xe.Tokens.Last.NeedObjectName() {
 			xe.Buf = append(xe.Tokens.MayAppendDelim(xe.Buf, '{'), "{}"...)
 			xe.Tokens.Last.Increment()
 			if xe.NeedFlush() {
@@ -109,12 +125,12 @@ func marshalObjectAny(enc *jsontext.Encoder, obj map[string]any, mo *jsonopts.St
 		}
 	}
 
-	if err := enc.WriteToken(jsontext.ObjectStart); err != nil {
+	if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 		return err
 	}
 	// A Go map guarantees that each entry has a unique key
 	// The only possibility of duplicates is due to invalid UTF-8.
-	if !xe.Flags.Get(jsonflags.AllowInvalidUTF8) {
+	if !mo.Flags.Get(jsonflags.AllowInvalidUTF8) {
 		xe.Tokens.Last.DisableNamespace()
 	}
 	if !mo.Flags.Get(jsonflags.Deterministic) || len(obj) <= 1 {
@@ -144,64 +160,67 @@ func marshalObjectAny(enc *jsontext.Encoder, obj map[string]any, mo *jsonopts.St
 		}
 		putStrings(names)
 	}
-	if err := enc.WriteToken(jsontext.ObjectEnd); err != nil {
+	if err := enc.WriteToken(jsontext.EndObject); err != nil {
 		return err
 	}
 	return nil
 }
 
+// unmarshalObjectAny unmarshals a JSON object as a Go map[string]any.
+// It panics if not decoding a JSON object.
 func unmarshalObjectAny(dec *jsontext.Decoder, uo *jsonopts.Struct) (map[string]any, error) {
-	tok, err := dec.ReadToken()
-	if err != nil {
+	switch tok, err := dec.ReadToken(); {
+	case err != nil:
 		return nil, err
+	case tok.Kind() != '{':
+		panic("BUG: invalid kind: " + tok.Kind().String())
 	}
-	k := tok.Kind()
-	switch k {
-	case 'n':
-		return nil, nil
-	case '{':
-		xd := export.Decoder(dec)
-		obj := make(map[string]any)
-		// A Go map guarantees that each entry has a unique key
-		// The only possibility of duplicates is due to invalid UTF-8.
-		if !xd.Flags.Get(jsonflags.AllowInvalidUTF8) {
-			xd.Tokens.Last.DisableNamespace()
-		}
-		for dec.PeekKind() != '}' {
-			tok, err := dec.ReadToken()
-			if err != nil {
-				return obj, err
-			}
-			name := tok.String()
-
-			// Manually check for duplicate names.
-			if _, ok := obj[name]; ok {
-				name := xd.PreviousBuffer()
-				err := export.NewDuplicateNameError(name, dec.InputOffset()-len64(name))
-				return obj, err
-			}
-
-			val, err := unmarshalValueAny(dec, uo)
-			obj[name] = val
-			if err != nil {
-				return obj, err
-			}
-		}
-		if _, err := dec.ReadToken(); err != nil {
+	obj := make(map[string]any)
+	// A Go map guarantees that each entry has a unique key
+	// The only possibility of duplicates is due to invalid UTF-8.
+	if !uo.Flags.Get(jsonflags.AllowInvalidUTF8) {
+		export.Decoder(dec).Tokens.Last.DisableNamespace()
+	}
+	var errUnmarshal error
+	for dec.PeekKind() != '}' {
+		tok, err := dec.ReadToken()
+		if err != nil {
 			return obj, err
 		}
-		return obj, nil
+		name := tok.String()
+
+		// Manually check for duplicate names.
+		if _, ok := obj[name]; ok {
+			// TODO: Unread the object name.
+			name := export.Decoder(dec).PreviousTokenOrValue()
+			err := newDuplicateNameError(dec.StackPointer(), nil, dec.InputOffset()-len64(name))
+			return obj, err
+		}
+
+		val, err := unmarshalValueAny(dec, uo)
+		obj[name] = val
+		if err != nil {
+			if isFatalError(err, uo.Flags) {
+				return obj, err
+			}
+			errUnmarshal = cmp.Or(err, errUnmarshal)
+		}
 	}
-	return nil, &SemanticError{action: "unmarshal", JSONKind: k, GoType: mapStringAnyType}
+	if _, err := dec.ReadToken(); err != nil {
+		return obj, err
+	}
+	return obj, errUnmarshal
 }
 
+// marshalArrayAny marshals a Go []any as a JSON array
+// (or as a JSON null if nil and [jsonflags.FormatNilSliceAsNull]).
 func marshalArrayAny(enc *jsontext.Encoder, arr []any, mo *jsonopts.Struct) error {
 	// Check for cycles.
 	xe := export.Encoder(enc)
 	if xe.Tokens.Depth() > startDetectingCyclesAfter {
 		v := reflect.ValueOf(arr)
 		if err := visitPointer(&xe.SeenPointers, v); err != nil {
-			return err
+			return newMarshalErrorBefore(enc, sliceAnyType, err)
 		}
 		defer leavePointer(&xe.SeenPointers, v)
 	}
@@ -212,7 +231,7 @@ func marshalArrayAny(enc *jsontext.Encoder, arr []any, mo *jsonopts.Struct) erro
 			return enc.WriteToken(jsontext.Null)
 		}
 		// Optimize for marshaling an empty slice without any preceding whitespace.
-		if !xe.Flags.Get(jsonflags.Expand) && !xe.Tokens.Last.NeedObjectName() {
+		if !mo.Flags.Get(jsonflags.AnyWhitespace) && !xe.Tokens.Last.NeedObjectName() {
 			xe.Buf = append(xe.Tokens.MayAppendDelim(xe.Buf, '['), "[]"...)
 			xe.Tokens.Last.Increment()
 			if xe.NeedFlush() {
@@ -222,7 +241,7 @@ func marshalArrayAny(enc *jsontext.Encoder, arr []any, mo *jsonopts.Struct) erro
 		}
 	}
 
-	if err := enc.WriteToken(jsontext.ArrayStart); err != nil {
+	if err := enc.WriteToken(jsontext.BeginArray); err != nil {
 		return err
 	}
 	for _, val := range arr {
@@ -230,34 +249,35 @@ func marshalArrayAny(enc *jsontext.Encoder, arr []any, mo *jsonopts.Struct) erro
 			return err
 		}
 	}
-	if err := enc.WriteToken(jsontext.ArrayEnd); err != nil {
+	if err := enc.WriteToken(jsontext.EndArray); err != nil {
 		return err
 	}
 	return nil
 }
 
+// unmarshalArrayAny unmarshals a JSON array as a Go []any.
+// It panics if not decoding a JSON array.
 func unmarshalArrayAny(dec *jsontext.Decoder, uo *jsonopts.Struct) ([]any, error) {
-	tok, err := dec.ReadToken()
-	if err != nil {
+	switch tok, err := dec.ReadToken(); {
+	case err != nil:
 		return nil, err
+	case tok.Kind() != '[':
+		panic("BUG: invalid kind: " + tok.Kind().String())
 	}
-	k := tok.Kind()
-	switch k {
-	case 'n':
-		return nil, nil
-	case '[':
-		arr := []any{}
-		for dec.PeekKind() != ']' {
-			val, err := unmarshalValueAny(dec, uo)
-			arr = append(arr, val)
-			if err != nil {
+	arr := []any{}
+	var errUnmarshal error
+	for dec.PeekKind() != ']' {
+		val, err := unmarshalValueAny(dec, uo)
+		arr = append(arr, val)
+		if err != nil {
+			if isFatalError(err, uo.Flags) {
 				return arr, err
 			}
+			errUnmarshal = cmp.Or(errUnmarshal, err)
 		}
-		if _, err := dec.ReadToken(); err != nil {
-			return arr, err
-		}
-		return arr, nil
 	}
-	return nil, &SemanticError{action: "unmarshal", JSONKind: k, GoType: sliceAnyType}
+	if _, err := dec.ReadToken(); err != nil {
+		return arr, err
+	}
+	return arr, errUnmarshal
 }

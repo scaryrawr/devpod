@@ -49,3 +49,9 @@ client/web/build/assets
 *.xcworkspacedata
 /tstest/tailmac/bin
 /tstest/tailmac/build
+
+# Ignore personal IntelliJ settings
+.idea/
+
+# Ignore syncthing state directory.
+/.stfolder

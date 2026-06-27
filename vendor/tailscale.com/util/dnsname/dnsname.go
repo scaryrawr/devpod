@@ -1,20 +1,20 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package dnsname contains string functions for working with DNS names.
 package dnsname
 
 import (
-	"errors"
-	"fmt"
 	"strings"
+
+	"tailscale.com/util/vizerror"
 )
 
 const (
 	// maxLabelLength is the maximum length of a label permitted by RFC 1035.
 	maxLabelLength = 63
 	// maxNameLength is the maximum length of a DNS name.
-	maxNameLength = 253
+	maxNameLength = 254
 )
 
 // A FQDN is a fully-qualified DNS name or name suffix.
@@ -36,7 +36,7 @@ func ToFQDN(s string) (FQDN, error) {
 		totalLen += 1 // account for missing dot
 	}
 	if totalLen > maxNameLength {
-		return "", fmt.Errorf("%q is too long to be a DNS name", s)
+		return "", vizerror.Errorf("%q is too long to be a DNS name", s)
 	}
 
 	st := 0
@@ -54,7 +54,7 @@ func ToFQDN(s string) (FQDN, error) {
 		//
 		// See https://github.com/tailscale/tailscale/issues/2024 for more.
 		if len(label) == 0 || len(label) > maxLabelLength {
-			return "", fmt.Errorf("%q is not a valid DNS label", label)
+			return "", vizerror.Errorf("%q is not a valid DNS label", label)
 		}
 		st = i + 1
 	}
@@ -94,26 +94,39 @@ func (f FQDN) Contains(other FQDN) bool {
 	return strings.HasSuffix(other.WithTrailingDot(), cmp)
 }
 
-// ValidLabel reports whether label is a valid DNS label.
+// Parent returns the parent domain by stripping the first label.
+// For "foo.bar.baz.", it returns "bar.baz."
+// It returns an empty FQDN for root or single-label domains.
+func (f FQDN) Parent() FQDN {
+	s := f.WithTrailingDot()
+	_, rest, ok := strings.Cut(s, ".")
+	if !ok || rest == "" {
+		return ""
+	}
+	return FQDN(rest)
+}
+
+// ValidLabel reports whether label is a valid DNS label. All errors are
+// [vizerror.Error].
 func ValidLabel(label string) error {
 	if len(label) == 0 {
-		return errors.New("empty DNS label")
+		return vizerror.New("empty DNS label")
 	}
 	if len(label) > maxLabelLength {
-		return fmt.Errorf("%q is too long, max length is %d bytes", label, maxLabelLength)
+		return vizerror.Errorf("%q is too long, max length is %d bytes", label, maxLabelLength)
 	}
 	if !isalphanum(label[0]) {
-		return fmt.Errorf("%q is not a valid DNS label: must start with a letter or number", label)
+		return vizerror.Errorf("%q is not a valid DNS label: must start with a letter or number", label)
 	}
 	if !isalphanum(label[len(label)-1]) {
-		return fmt.Errorf("%q is not a valid DNS label: must end with a letter or number", label)
+		return vizerror.Errorf("%q is not a valid DNS label: must end with a letter or number", label)
 	}
 	if len(label) < 2 {
 		return nil
 	}
 	for i := 1; i < len(label)-1; i++ {
 		if !isdnschar(label[i]) {
-			return fmt.Errorf("%q is not a valid DNS label: contains invalid character %q", label, label[i])
+			return vizerror.Errorf("%q is not a valid DNS label: contains invalid character %q", label, label[i])
 		}
 	}
 	return nil

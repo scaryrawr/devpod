@@ -25,7 +25,6 @@ import (
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/cli/cli/config/types"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/mitchellh/go-homedir"
 )
 
 // Resource represents a registry or repository that can be authenticated against.
@@ -84,7 +83,7 @@ func (dk *defaultKeychain) Resolve(target Resource) (Authenticator, error) {
 }
 
 // Resolve implements Keychain.
-func (dk *defaultKeychain) ResolveContext(ctx context.Context, target Resource) (Authenticator, error) {
+func (dk *defaultKeychain) ResolveContext(_ context.Context, target Resource) (Authenticator, error) {
 	dk.mu.Lock()
 	defer dk.mu.Unlock()
 
@@ -95,7 +94,7 @@ func (dk *defaultKeychain) ResolveContext(ctx context.Context, target Resource) 
 
 	// First, check $HOME/.docker/config.json
 	foundDockerConfig := false
-	home, err := homedir.Dir()
+	home, err := os.UserHomeDir()
 	if err == nil {
 		foundDockerConfig = fileExists(filepath.Join(home, ".docker/config.json"))
 	}
@@ -117,8 +116,8 @@ func (dk *defaultKeychain) ResolveContext(ctx context.Context, target Resource) 
 		if err != nil {
 			return nil, err
 		}
-	} else if fileExists(os.Getenv("REGISTRY_AUTH_FILE")) {
-		f, err := os.Open(os.Getenv("REGISTRY_AUTH_FILE"))
+	} else if path := filepath.Clean(os.Getenv("REGISTRY_AUTH_FILE")); fileExists(path) {
+		f, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
@@ -127,8 +126,8 @@ func (dk *defaultKeychain) ResolveContext(ctx context.Context, target Resource) 
 		if err != nil {
 			return nil, err
 		}
-	} else if fileExists(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "containers/auth.json")) {
-		f, err := os.Open(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "containers/auth.json"))
+	} else if path := filepath.Clean(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "containers/auth.json")); fileExists(path) {
+		f, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
@@ -204,7 +203,7 @@ func (w wrapper) Resolve(r Resource) (Authenticator, error) {
 	return w.ResolveContext(context.Background(), r)
 }
 
-func (w wrapper) ResolveContext(ctx context.Context, r Resource) (Authenticator, error) {
+func (w wrapper) ResolveContext(_ context.Context, r Resource) (Authenticator, error) {
 	u, p, err := w.h.Get(r.RegistryStr())
 	if err != nil {
 		return Anonymous, nil

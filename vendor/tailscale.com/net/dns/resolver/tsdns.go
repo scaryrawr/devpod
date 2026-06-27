@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package resolver implements a stub DNS resolver that can also serve
@@ -25,6 +25,8 @@ import (
 	dns "golang.org/x/net/dns/dnsmessage"
 	"tailscale.com/control/controlknobs"
 	"tailscale.com/envknob"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/health"
 	"tailscale.com/net/dns/resolvconffile"
 	"tailscale.com/net/netaddr"
@@ -37,6 +39,7 @@ import (
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/cloudenv"
 	"tailscale.com/util/dnsname"
+	"tailscale.com/util/set"
 )
 
 const dnsSymbolicFQDN = "magicdns.localhost-tailscale-daemon."
@@ -67,6 +70,9 @@ type packet struct {
 // Else forward the query to the most specific matching entry in Routes.
 // Else return SERVFAIL.
 type Config struct {
+	// True if [Prefs.CorpDNS] is true or --accept-dns=true was specified.
+	// This should only be used for error handling and health reporting.
+	AcceptDNS bool
 	// Routes is a map of DNS name suffix to the resolvers to use for
 	// queries within that suffix.
 	// Queries only match the most specific suffix.
@@ -77,6 +83,12 @@ type Config struct {
 	// LocalDomains is a list of DNS name suffixes that should not be
 	// routed to upstream resolvers.
 	LocalDomains []dnsname.FQDN
+	// SubdomainHosts is a set of FQDNs from Hosts that should also
+	// resolve subdomain queries to the same IPs. If a query like
+	// "sub.node.tailnet.ts.net" doesn't match Hosts directly, and
+	// "node.tailnet.ts.net" is in SubdomainHosts, the query resolves
+	// to the IPs for "node.tailnet.ts.net".
+	SubdomainHosts set.Set[dnsname.FQDN]
 }
 
 // WriteToBufioWriter write a debug version of c for logs to w, omitting
@@ -212,10 +224,11 @@ type Resolver struct {
 	closed chan struct{}
 
 	// mu guards the following fields from being updated while used.
-	mu           sync.Mutex
-	localDomains []dnsname.FQDN
-	hostToIP     map[dnsname.FQDN][]netip.Addr
-	ipToHost     map[netip.Addr]dnsname.FQDN
+	mu             syncs.Mutex
+	localDomains   []dnsname.FQDN
+	hostToIP       map[dnsname.FQDN][]netip.Addr
+	ipToHost       map[netip.Addr]dnsname.FQDN
+	subdomainHosts set.Set[dnsname.FQDN]
 }
 
 type ForwardLinkSelector interface {
@@ -251,18 +264,12 @@ func New(logf logger.Logf, linkSel ForwardLinkSelector, dialer *tsdial.Dialer, h
 	return r
 }
 
-// SetMissingUpstreamRecovery sets a callback to be called upon encountering
-// a SERVFAIL due to missing upstream resolvers.
-//
-// This call should only happen before the resolver is used. It is not safe
-// for concurrent use.
-func (r *Resolver) SetMissingUpstreamRecovery(f func()) {
-	r.forwarder.missingUpstreamRecovery = f
-}
-
 func (r *Resolver) TestOnlySetHook(hook func(Config)) { r.saveConfigForTests = hook }
 
 func (r *Resolver) SetConfig(cfg Config) error {
+	if !buildfeatures.HasDNS {
+		return nil
+	}
 	if r.saveConfigForTests != nil {
 		r.saveConfigForTests(cfg)
 	}
@@ -275,19 +282,23 @@ func (r *Resolver) SetConfig(cfg Config) error {
 		}
 	}
 
-	r.forwarder.setRoutes(cfg.Routes)
+	r.forwarder.setRoutes(cfg.Routes, cfg.AcceptDNS)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.localDomains = cfg.LocalDomains
 	r.hostToIP = cfg.Hosts
 	r.ipToHost = reverse
+	r.subdomainHosts = cfg.SubdomainHosts
 	return nil
 }
 
 // Close shuts down the resolver and ensures poll goroutines have exited.
 // The Resolver cannot be used again after Close is called.
 func (r *Resolver) Close() {
+	if !buildfeatures.HasDNS {
+		return
+	}
 	select {
 	case <-r.closed:
 		return
@@ -305,6 +316,9 @@ func (r *Resolver) Close() {
 const dnsQueryTimeout = 10 * time.Second
 
 func (r *Resolver) Query(ctx context.Context, bs []byte, family string, from netip.AddrPort) ([]byte, error) {
+	if !buildfeatures.HasDNS {
+		return nil, feature.ErrUnavailable
+	}
 	metricDNSQueryLocal.Add(1)
 	select {
 	case <-r.closed:
@@ -326,12 +340,20 @@ func (r *Resolver) Query(ctx context.Context, bs []byte, family string, from net
 		return (<-responses).bs, nil
 	}
 
-	return out, err
+	if err != nil {
+		return out, err
+	}
+
+	out = checkResponseSizeAndSetTC(out, bs, family, r.logf)
+	return out, nil
 }
 
 // GetUpstreamResolvers returns the resolvers that would be used to resolve
 // the given FQDN.
 func (r *Resolver) GetUpstreamResolvers(name dnsname.FQDN) []*dnstype.Resolver {
+	if !buildfeatures.HasDNS {
+		return nil
+	}
 	return r.forwarder.GetUpstreamResolvers(name)
 }
 
@@ -360,6 +382,9 @@ func parseExitNodeQuery(q []byte) *response {
 // and a nil error.
 // TODO: figure out if we even need an error result.
 func (r *Resolver) HandlePeerDNSQuery(ctx context.Context, q []byte, from netip.AddrPort, allowName func(name string) bool) (res []byte, err error) {
+	if !buildfeatures.HasDNS {
+		return nil, feature.ErrUnavailable
+	}
 	metricDNSExitProxyQuery.Add(1)
 	ch := make(chan packet, 1)
 
@@ -384,7 +409,7 @@ func (r *Resolver) HandlePeerDNSQuery(ctx context.Context, q []byte, from netip.
 		// but for now that's probably good enough. Later we'll
 		// want to blend in everything from scutil --dns.
 		fallthrough
-	case "linux", "freebsd", "openbsd", "illumos", "ios":
+	case "linux", "freebsd", "openbsd", "illumos", "solaris", "ios":
 		nameserver, err := stubResolverForOS()
 		if err != nil {
 			r.logf("stubResolverForOS: %v", err)
@@ -436,6 +461,9 @@ var debugExitNodeDNSNetPkg = envknob.RegisterBool("TS_DEBUG_EXIT_NODE_DNS_NET_PK
 // response contains the pre-serialized response, which notably
 // includes the original question and its header.
 func handleExitNodeDNSQueryWithNetPkg(ctx context.Context, logf logger.Logf, resolver *net.Resolver, resp *response) (res []byte, err error) {
+	if !buildfeatures.HasDNS {
+		return nil, feature.ErrUnavailable
+	}
 	logf = logger.WithPrefix(logf, "exitNodeDNSQueryWithNetPkg: ")
 	if resp.Question.Class != dns.ClassINET {
 		return nil, errors.New("unsupported class")
@@ -631,9 +659,18 @@ func (r *Resolver) resolveLocal(domain dnsname.FQDN, typ dns.Type) (netip.Addr, 
 	r.mu.Lock()
 	hosts := r.hostToIP
 	localDomains := r.localDomains
+	subdomainHosts := r.subdomainHosts
 	r.mu.Unlock()
 
 	addrs, found := hosts[domain]
+	if !found {
+		for parent := domain.Parent(); parent != ""; parent = parent.Parent() {
+			if subdomainHosts.Contains(parent) {
+				addrs, found = hosts[parent]
+				break
+			}
+		}
+	}
 	if !found {
 		for _, suffix := range localDomains {
 			if suffix.Contains(domain) {
@@ -1256,6 +1293,9 @@ func (r *Resolver) respondReverse(query []byte, name dnsname.FQDN, resp *respons
 // respond returns a DNS response to query if it can be resolved locally.
 // Otherwise, it returns errNotOurName.
 func (r *Resolver) respond(query []byte) ([]byte, error) {
+	if !buildfeatures.HasDNS {
+		return nil, feature.ErrUnavailable
+	}
 	parser := dnsParserPool.Get().(*dnsParser)
 	defer dnsParserPool.Put(parser)
 

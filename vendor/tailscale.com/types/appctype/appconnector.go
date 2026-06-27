@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package appcfg contains an experimental configuration structure for
@@ -8,6 +8,7 @@ package appctype
 import (
 	"net/netip"
 
+	"go4.org/netipx"
 	"tailscale.com/tailcfg"
 )
 
@@ -72,4 +73,38 @@ type AppConnectorAttr struct {
 	// These can either be "*" to match any advertising connector, or a
 	// tag of the form tag:<tag-name>.
 	Connectors []string `json:"connectors,omitempty"`
+}
+
+// RouteInfo is a data structure used to persist the in memory state of an AppConnector
+// so that we can know, even after a restart, which routes came from ACLs and which were
+// learned from domains.
+type RouteInfo struct {
+	// Control is the routes from the 'routes' section of an app connector acl.
+	Control []netip.Prefix `json:",omitempty"`
+	// Domains are the routes discovered by observing DNS lookups for configured domains.
+	Domains map[string][]netip.Addr `json:",omitempty"`
+	// Wildcards are the configured DNS lookup domains to observe. When a DNS query matches Wildcards,
+	// its result is added to Domains.
+	Wildcards []string `json:",omitempty"`
+}
+
+// RouteUpdate records a set of routes that should be advertised and a set of
+// routes that should be unadvertised in event bus updates.
+type RouteUpdate struct {
+	Advertise   []netip.Prefix
+	Unadvertise []netip.Prefix
+}
+
+type Conn25Attr struct {
+	// Name is the name of this collection of domains.
+	Name string `json:"name,omitempty"`
+	// Domains enumerates the domains serviced by the specified app connectors.
+	// Domains can be of the form: example.com, or *.example.com.
+	Domains []string `json:"domains,omitempty"`
+	// Connectors enumerates the app connectors which service these domains.
+	// These can either be "*" to match any advertising connector, or a
+	// tag of the form tag:<tag-name>.
+	Connectors    []string         `json:"connectors,omitempty"`
+	MagicIPPool   []netipx.IPRange `json:"magicIPPool,omitempty"`
+	TransitIPPool []netipx.IPRange `json:"transitIPPool,omitempty"`
 }

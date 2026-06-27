@@ -18,10 +18,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/google/go-containerregistry/internal/limit"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
@@ -61,13 +61,13 @@ func (f *fetcher) fetchReferrers(ctx context.Context, filter map[string]string, 
 	}
 	defer resp.Body.Close()
 
-	if err := transport.CheckError(resp, http.StatusOK, http.StatusNotFound, http.StatusBadRequest); err != nil {
+	if err := transport.CheckError(resp, http.StatusOK, http.StatusNotFound, http.StatusBadRequest, http.StatusNotAcceptable); err != nil {
 		return nil, err
 	}
 
 	var b []byte
 	if resp.StatusCode == http.StatusOK && resp.Header.Get("Content-Type") == string(types.OCIImageIndex) {
-		b, err = io.ReadAll(resp.Body)
+		b, err = limit.ReadAll(resp.Body, manifestLimit)
 		if err != nil {
 			return nil, err
 		}

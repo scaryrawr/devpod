@@ -1,4 +1,4 @@
-// Copyright (c) Tailscale Inc & AUTHORS
+// Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
 // Package socks5 is a SOCKS5 server implementation.
@@ -120,10 +120,10 @@ func (s *Server) logf(format string, args ...any) {
 }
 
 // Serve accepts and handles incoming connections on the given listener.
-func (s *Server) Serve(l net.Listener) error {
-	defer l.Close()
+func (s *Server) Serve(ln net.Listener) error {
+	defer ln.Close()
 	for {
-		c, err := l.Accept()
+		c, err := ln.Accept()
 		if err != nil {
 			return err
 		}
