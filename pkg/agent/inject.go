@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	devpodhttp "github.com/loft-sh/devpod/pkg/http"
 	"github.com/loft-sh/devpod/pkg/inject"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/shell"
 	"github.com/loft-sh/devpod/pkg/version"
-	"github.com/loft-sh/devpod/pkg/log"
 )
 
 var waitForInstanceConnectionTimeout = time.Minute * 5
@@ -164,6 +166,13 @@ func injectBinary(arm bool, tryDownloadURL string, log log.Logger) (io.ReadClose
 
 	// try to look up runner binaries
 	if binaryPath == "" {
+		binaryPath, err = buildDevAgentBinary(targetArch, log)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if binaryPath == "" {
 		binaryPath = getRunnerBinary(targetArch)
 	}
 
@@ -182,6 +191,73 @@ func injectBinary(arm bool, tryDownloadURL string, log log.Logger) (io.ReadClose
 	}
 
 	return file, nil
+}
+
+func buildDevAgentBinary(targetArch string, log log.Logger) (string, error) {
+	if version.GetVersion() != version.DevVersion {
+		return "", nil
+	}
+
+	sourceRoot, err := findDevPodSourceRoot()
+	if err != nil || sourceRoot == "" {
+		return "", err
+	}
+
+	agentPath := filepath.Join(os.TempDir(), "devpod-cache", "devpod-linux-"+targetArch)
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0755); err != nil {
+		return "", fmt.Errorf("create agent path: %w", err)
+	}
+
+	tmpPath := agentPath + ".tmp"
+	_ = os.Remove(tmpPath)
+
+	var output bytes.Buffer
+	cmd := exec.Command("go", "build", "-o", tmpPath, ".")
+	cmd.Dir = sourceRoot
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+targetArch, "GOFLAGS=-mod=vendor")
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	log.Debugf("Building local DevPod agent for linux/%s", targetArch)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("build local DevPod agent: %w: %s", err, strings.TrimSpace(output.String()))
+	}
+
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		return "", fmt.Errorf("chmod local DevPod agent: %w", err)
+	}
+	if err := os.Rename(tmpPath, agentPath); err != nil {
+		return "", fmt.Errorf("install local DevPod agent: %w", err)
+	}
+
+	return agentPath, nil
+}
+
+func findDevPodSourceRoot() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get working directory: %w", err)
+	}
+
+	return findDevPodSourceRootFrom(wd)
+}
+
+func findDevPodSourceRootFrom(dir string) (string, error) {
+	for {
+		goModPath := filepath.Join(dir, "go.mod")
+		rawGoMod, err := os.ReadFile(goModPath)
+		if err == nil && strings.Contains(string(rawGoMod), "module github.com/loft-sh/devpod") {
+			return dir, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("read %s: %w", goModPath, err)
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", nil
+		}
+		dir = parent
+	}
 }
 
 func downloadAgentLocally(tryDownloadURL, targetArch string, log log.Logger) (string, error) {

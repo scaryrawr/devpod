@@ -56,8 +56,8 @@ func ExecuteCommand(
 		defer writer.Close()
 
 		log.Debugf("Inject and run command: %s", sshCommand)
-		err := agentInject(ctx, sshCommand, sshTunnelStdinReader, sshTunnelStdoutWriter, writer)
-		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "signal: ") {
+		err := agentInject(cancelCtx, sshCommand, sshTunnelStdinReader, sshTunnelStdoutWriter, writer)
+		if err != nil && !isExpectedShutdown(cancelCtx, err) {
 			errChan <- fmt.Errorf("executing agent command: %w", err)
 		} else {
 			errChan <- nil
@@ -124,8 +124,8 @@ func ExecuteCommand(
 		writer := log.Writer(logrus.InfoLevel, false)
 		defer writer.Close()
 
-		err = devssh.Run(ctx, sshClient, command, gRPCConnStdinReader, gRPCConnStdoutWriter, writer, nil)
-		if err != nil {
+		err = devssh.Run(cancelCtx, sshClient, command, gRPCConnStdinReader, gRPCConnStdoutWriter, writer, nil)
+		if err != nil && !isExpectedShutdown(cancelCtx, err) {
 			errChan <- errors.Wrap(err, "run agent command")
 		} else {
 			errChan <- nil
@@ -143,4 +143,16 @@ func ExecuteCommand(
 	}
 
 	return result, <-errChan
+}
+
+func isExpectedShutdown(ctx context.Context, err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	if ctx.Err() != nil {
+		return true
+	}
+
+	return strings.Contains(err.Error(), "signal: ")
 }

@@ -3,6 +3,7 @@ module github.com/loft-sh/devpod
 go 1.26.3
 
 require (
+	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29
 	github.com/PaesslerAG/jsonpath v0.1.1
 	github.com/alessio/shellescape v1.4.2
 	github.com/awslabs/amazon-ecr-credential-helper/ecr-login v0.12.0
@@ -56,7 +57,6 @@ require (
 	golang.org/x/term v0.44.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
-	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce
 	gopkg.in/square/go-jose.v2 v2.6.0
 	gopkg.in/yaml.v2 v2.4.0
 	gotest.tools v2.2.0+incompatible
@@ -298,7 +298,6 @@ require (
 
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
-	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 // indirect
 	github.com/PaesslerAG/gval v1.2.4 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/containerd/console v1.0.5 // indirect
