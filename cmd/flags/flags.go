@@ -29,7 +29,7 @@ func SetGlobalFlags(flags *flag.FlagSet) *GlobalFlags {
 	flags.BoolVar(&globalFlags.Debug, "debug", false, "Prints the stack trace if an error occurs")
 	flags.BoolVar(&globalFlags.Silent, "silent", false, "Run in silent mode and prevents any devpod log output except panics & fatals")
 
-	flags.Var(&globalFlags.Owner, "owner", "Show pro workspaces for owner")
+	flags.Var(&globalFlags.Owner, "owner", "Filter workspaces by owner")
 	_ = flags.MarkHidden("owner")
 	flags.StringVar(&globalFlags.UID, "uid", "", "Set UID for workspace")
 	_ = flags.MarkHidden("uid")

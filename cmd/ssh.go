@@ -17,7 +17,6 @@ import (
 	"github.com/loft-sh/devpod/pkg/agent"
 	client2 "github.com/loft-sh/devpod/pkg/client"
 	"github.com/loft-sh/devpod/pkg/config"
-	daemon "github.com/loft-sh/devpod/pkg/daemon/platform"
 	"github.com/loft-sh/devpod/pkg/gpg"
 	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/port"
@@ -666,24 +665,9 @@ func startSSHKeepAlive(ctx context.Context, client *ssh.Client, interval time.Du
 }
 
 func startServicesDaemon(ctx context.Context, devPodConfig *config.Config, client client2.DaemonClient, sshClient *ssh.Client, user string, log log.Logger, forwardPorts bool, extraPorts []string) error {
-	workspace, err := daemon.NewLocalClient(client.Provider()).GetWorkspace(ctx, client.WorkspaceConfig().UID)
-	if err != nil {
-		return err
-	}
-
 	configureDockerCredentials := devPodConfig.ContextOption(config.ContextOptionSSHInjectDockerCredentials) == "true"
 	configureGitCredentials := devPodConfig.ContextOption(config.ContextOptionSSHInjectGitCredentials) == "true"
 	configureGitSSHSignatureHelper := devPodConfig.ContextOption(config.ContextOptionGitSSHSignatureForwarding) == "true"
-
-	if workspace != nil && workspace.Status.Instance != nil && workspace.Status.Instance.CredentialForwarding != nil {
-		if workspace.Status.Instance.CredentialForwarding.Docker != nil {
-			configureDockerCredentials = !workspace.Status.Instance.CredentialForwarding.Docker.Disabled
-		}
-		if workspace.Status.Instance.CredentialForwarding.Git != nil {
-			configureGitCredentials = !workspace.Status.Instance.CredentialForwarding.Git.Disabled
-			configureGitSSHSignatureHelper = !workspace.Status.Instance.CredentialForwarding.Git.Disabled
-		}
-	}
 
 	if user != "" {
 		return tunnel.RunServices(

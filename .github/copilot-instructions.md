@@ -20,7 +20,7 @@
 
 - `main.go` only enters `cmd.Execute()`. CLI command wiring lives in `cmd/root.go`; add Cobra commands through `BuildRoot()` and keep command-specific flags/logic in `cmd/<command>.go` or a `cmd/<domain>/` package.
 - Workspace commands resolve a provider/workspace/machine in `pkg/workspace`, then select a concrete client through `pkg/client` interfaces. Implementations are split between direct workspace clients, daemon clients, proxy clients, and machine clients under `pkg/client/clientimplementation`.
-- Providers are declarative YAML command adapters. Built-in provider definitions live in `providers/{docker,kubernetes,pro}/provider.yaml` and are embedded by `providers/providers.go`; provider schema and runtime config types live in `pkg/provider`.
+- Providers are declarative YAML command adapters. Built-in provider definitions live in `providers/{docker,kubernetes}/provider.yaml` and are embedded by `providers/providers.go`; provider schema and runtime config types live in `pkg/provider`.
 - Devcontainer handling is centered in `pkg/devcontainer`: config parsing/substitution is in `pkg/devcontainer/config`, Docker/Compose/Kubernetes execution paths are in sibling files, and missing devcontainer files can be replaced by language-detected defaults.
 - The agent path is separate from the local CLI. CLI commands such as `up` invoke agent workflows, configure SSH/IDE integration locally, and then open IDE-specific packages under `pkg/ide`.
 - Agent binary downloads default to `https://github.com/scaryrawr/devpod/releases/...`; `DEVPOD_AGENT_URL` can override this for local testing or alternate release locations.

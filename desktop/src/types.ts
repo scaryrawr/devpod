@@ -1,5 +1,4 @@
 import { UseMutationResult } from "@tanstack/react-query"
-import { TStreamEventListenerFn } from "./client"
 
 type TMaybe<T> = T | null | undefined
 export type TUnsubscribeFn = VoidFunction
@@ -201,14 +200,6 @@ export const SUPPORTED_IDES = [
   "windsurf",
 ] as const
 export type TSupportedIDE = (typeof SUPPORTED_IDES)[number]
-export type TImportWorkspaceConfig = Readonly<{
-  workspaceID: string
-  workspaceUID: string
-  devPodProHost: string
-  project: string
-  options: Record<string, string> | null
-}>
-
 //#endregion
 
 //#region Context
@@ -225,43 +216,6 @@ export type TContextOption = Readonly<{
   default: string | null | undefined
   enum: readonly string[] | null | undefined
   value: string | null | undefined
-}>
-//#endregion
-
-//#region Pro
-export type TProID = string
-export type TWithProID = Readonly<{ id: TProID }>
-export type TProInstance = Readonly<{
-  host: TMaybe<string>
-  provider: TMaybe<string>
-  creationTimestamp: TMaybe<string>
-  authenticated: TMaybe<boolean>
-  capabilities: TMaybe<readonly string[]>
-}>
-export type TProInstances = readonly TProInstance[]
-export type TProInstanceManager = Readonly<{
-  login: TRunnable<TProInstanceLoginConfig> &
-    Pick<UseMutationResult<TProvider, Error, unknown>, "status" | "error" | "reset"> & {
-      provider: TProvider | undefined
-    }
-  disconnect: TRunnable<TWithProID> &
-    Pick<UseMutationResult, "status" | "error"> & { target: TWithProID | undefined }
-}>
-export type TProInstanceLoginConfig = Readonly<{
-  host: string
-  accessKey?: string
-  streamListener?: TStreamEventListenerFn
-}>
-export type TListProInstancesConfig = Readonly<
-  | {
-      authenticate?: boolean
-    }
-  | undefined
->
-export type TPlatformVersionInfo = Readonly<{
-  serverVersion: TMaybe<string>
-  remoteProviderVersion: TMaybe<string>
-  currentProviderVersion: TMaybe<string>
 }>
 //#endregion
 

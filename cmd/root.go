@@ -12,14 +12,13 @@ import (
 	"github.com/loft-sh/devpod/cmd/helper"
 	"github.com/loft-sh/devpod/cmd/ide"
 	"github.com/loft-sh/devpod/cmd/machine"
-	"github.com/loft-sh/devpod/cmd/pro"
 	"github.com/loft-sh/devpod/cmd/provider"
 	"github.com/loft-sh/devpod/cmd/use"
 	"github.com/loft-sh/devpod/pkg/client/clientimplementation"
 	"github.com/loft-sh/devpod/pkg/config"
-	"github.com/loft-sh/devpod/pkg/telemetry"
 	log2 "github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/log/terminal"
+	"github.com/loft-sh/devpod/pkg/telemetry"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -122,7 +121,6 @@ func BuildRoot() *cobra.Command {
 	rootCmd.AddCommand(ide.NewIDECmd(globalFlags))
 	rootCmd.AddCommand(machine.NewMachineCmd(globalFlags))
 	rootCmd.AddCommand(context.NewContextCmd(globalFlags))
-	rootCmd.AddCommand(pro.NewProCmd(globalFlags, log2.Default))
 	rootCmd.AddCommand(NewUpCmd(globalFlags))
 	rootCmd.AddCommand(NewDeleteCmd(globalFlags))
 	rootCmd.AddCommand(NewSSHCmd(globalFlags))

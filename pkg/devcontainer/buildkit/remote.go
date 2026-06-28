@@ -23,8 +23,8 @@ import (
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
 	"github.com/loft-sh/devpod/pkg/devcontainer/feature"
 	"github.com/loft-sh/devpod/pkg/image"
-	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/moby/buildkit/session"
@@ -49,7 +49,7 @@ func BuildRemote(
 		return nil, fmt.Errorf("you cannot build in this mode. Please run 'devpod up' to rebuild the container")
 	}
 	if !options.CLIOptions.Platform.Enabled {
-		return nil, errors.New("remote builds are only supported in DevPod Pro")
+		return nil, errors.New("remote builds are not supported")
 	}
 	if options.CLIOptions.Platform.Build == nil {
 		return nil, errors.New("build options are required for remote builds")

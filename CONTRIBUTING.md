@@ -81,11 +81,3 @@ host: `open`
 searchParams: `source` (required), `workspace`, `provider`, `ide`
 
 `devpod://open?source=your-url-encoded-source&workspace=my-workspace&provider=docker&ide=vscode`
-
-### Import Workspace
-
-Import a remote DevPod.Pro workspace into your local client
-
-host: `import`
-searchParams: `workspace_id` (required), `workspace_uid` (required),
-`devpod_pro_host` (required), `options`

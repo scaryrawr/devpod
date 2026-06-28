@@ -41,12 +41,6 @@ alt if EXIT_AFTER_TIMEOUT
 Agent -> ContainerAgent: devpod agent container daemon
 end
 
-alt if pro user
-Agent -> ContainerAgent: devpod agent container setup-loft-platform-access
-ContainerAgent -> Platform: Setup pro
-Platform --> ContainerAgent: platform creds
-end
-
 alt if GIT_SSH_SIGNATURE_FORWARDING
 Agent -> DevPod: devpod agent git-credentials
 DevPod --> Agent: git creds

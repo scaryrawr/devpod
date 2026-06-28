@@ -20,7 +20,6 @@ import { Outlet, Link as RouterLink, useMatch, useNavigate } from "react-router-
 import { useBorderColor } from "../Theme"
 import {
   Notifications,
-  ProSwitcher,
   Sidebar,
   SidebarMenuItem,
   StatusBar,
@@ -37,7 +36,7 @@ import { useAppReady } from "./useAppReady"
 
 export function OSSApp() {
   const navigate = useNavigate()
-  const { errorModal, changelogModal, proLoginModal } = useAppReady()
+  const { errorModal, changelogModal } = useAppReady()
   const rootRouteMatch = useMatch(Routes.ROOT)
   const { sidebarPosition } = useSettings()
   const contentBackgroundColor = useColorModeValue("white", "background.darkest")
@@ -159,7 +158,6 @@ export function OSSApp() {
                             }
                           />
                         </Box>
-                        <ProSwitcher />
                       </GridItem>
                     </Grid>
                   </Toolbar>
@@ -205,7 +203,6 @@ export function OSSApp() {
       {welcomeModal}
       {errorModal}
       {changelogModal}
-      {proLoginModal}
     </>
   )
 }

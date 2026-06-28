@@ -1,7 +1,4 @@
-use crate::ui_messages::{
-    send_ui_message, ImportWorkspaceMsg, OpenWorkspaceMsg, SetupProMsg, ShowToastMsg, ToastStatus,
-    UiMessage,
-};
+use crate::ui_messages::{send_ui_message, OpenWorkspaceMsg, ShowToastMsg, ToastStatus, UiMessage};
 use crate::AppState;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -25,7 +22,7 @@ pub struct Request {
 pub struct UrlParser {}
 
 impl UrlParser {
-    const ALLOWED_METHODS: [&'static str; 3] = ["open", "import", "pro"];
+    const ALLOWED_METHODS: [&'static str; 1] = ["open"];
 
     fn get_host(url: &Url) -> String {
         url.host_str().unwrap_or("no host").to_string()
@@ -88,71 +85,6 @@ impl OpenHandler {
     }
 }
 
-pub struct ImportHandler {}
-
-impl ImportHandler {
-    pub async fn handle(
-        msg: Result<ImportWorkspaceMsg, ParseError>,
-        app_state: State<'_, AppState>,
-    ) {
-        match msg {
-            Ok(msg) => Self::handle_ok(msg, app_state).await,
-            Err(err) => Self::handle_error(err, app_state).await,
-        }
-    }
-
-    async fn handle_ok(msg: ImportWorkspaceMsg, app_state: State<'_, AppState>) {
-        // try to send to UI if ready, otherwise buffer and let ui_ready handle
-        send_ui_message(
-            app_state,
-            UiMessage::ImportWorkspace(msg),
-            "Failed to broadcast custom protocol message",
-        )
-        .await;
-    }
-
-    async fn handle_error(err: ParseError, app_state: State<'_, AppState>) {
-        #[cfg(not(target_os = "windows"))]
-        send_ui_message(
-            app_state,
-            UiMessage::CommandFailed(err),
-            "Failed to broadcast invalid custom protocol message",
-        )
-        .await;
-    }
-}
-
-pub struct ProHandler {}
-
-impl ProHandler {
-    pub async fn handle(msg: Result<SetupProMsg, ParseError>, app_state: State<'_, AppState>) {
-        match msg {
-            Ok(msg) => Self::handle_ok(msg, app_state).await,
-            Err(err) => Self::handle_error(err, app_state).await,
-        }
-    }
-
-    async fn handle_ok(msg: SetupProMsg, app_state: State<'_, AppState>) {
-        // try to send to UI if ready, otherwise buffer and let ui_ready handle
-        send_ui_message(
-            app_state,
-            UiMessage::SetupPro(msg),
-            "Failed to broadcast custom protocol message",
-        )
-        .await;
-    }
-
-    async fn handle_error(err: ParseError, app_state: State<'_, AppState>) {
-        #[cfg(not(target_os = "windows"))]
-        send_ui_message(
-            app_state,
-            UiMessage::CommandFailed(err),
-            "Failed to broadcast invalid custom protocol message",
-        )
-        .await;
-    }
-}
-
 impl CustomProtocol {
     pub fn init() -> Self {
         tauri_plugin_deep_link::prepare(APP_IDENTIFIER);
@@ -163,16 +95,17 @@ impl CustomProtocol {
         #[cfg(target_os = "linux")]
         {
             use std::{
-                fs::{remove_file},
+                fs::remove_file,
                 io::{ErrorKind, Write},
-                os::unix::net::{UnixStream}
+                os::unix::net::UnixStream,
             };
 
             let addr = format!("/tmp/{}-deep-link.sock", APP_IDENTIFIER);
 
             match UnixStream::connect(&addr) {
                 Ok(mut stream) => {
-                    if let Err(io_err) = stream.write_all(std::env::args().nth(1).unwrap_or_default().as_bytes())
+                    if let Err(io_err) =
+                        stream.write_all(std::env::args().nth(1).unwrap_or_default().as_bytes())
                     {
                         log::error!(
                             "Error sending message to primary instance: {}",
@@ -191,11 +124,12 @@ impl CustomProtocol {
 
         #[cfg(target_os = "windows")]
         {
-            use std::io::Write;
             use interprocess::local_socket::{LocalSocketListener, LocalSocketStream};
+            use std::io::Write;
 
             if let Ok(mut conn) = LocalSocketStream::connect(APP_IDENTIFIER) {
-                if let Err(io_err) = conn.write_all(std::env::args().nth(1).unwrap_or_default().as_bytes())
+                if let Err(io_err) =
+                    conn.write_all(std::env::args().nth(1).unwrap_or_default().as_bytes())
                 {
                     log::error!(
                         "Error sending message to primary instance: {}",
@@ -205,7 +139,6 @@ impl CustomProtocol {
                 let _ = conn.write_all(b"\n");
             }
         }
-
     }
 
     pub fn setup(&self, app: AppHandle) {
@@ -227,14 +160,6 @@ impl CustomProtocol {
                     "open" => {
                         let msg = CustomProtocol::parse(&request);
                         OpenHandler::handle(msg, app_state).await
-                    }
-                    "import" => {
-                        let msg = CustomProtocol::parse(&request);
-                        ImportHandler::handle(msg, app_state).await
-                    }
-                    "pro" => {
-                        let msg = CustomProtocol::parse(&request);
-                        ProHandler::handle(msg, app_state).await
                     }
                     _ => {}
                 }
@@ -317,10 +242,10 @@ mod tests {
 
         #[test]
         fn should_parse_with_empty_query() {
-            let url_str = "devpod://import";
+            let url_str = "devpod://open";
             let request = UrlParser::parse(&url_str).unwrap();
 
-            assert_eq!(request.host, "import".to_string());
+            assert_eq!(request.host, "open".to_string());
             assert_eq!(request.query, "".to_string());
         }
 
@@ -379,76 +304,6 @@ mod tests {
             assert_eq!(got.provider_id, None);
             assert_eq!(got.source, Some("some-source".to_string()));
             assert_eq!(got.ide, None)
-        }
-    }
-
-    mod custom_handler_import {
-        use crate::custom_protocol::ImportWorkspaceMsg;
-
-        use super::super::*;
-
-        #[test]
-        fn should_parse_full() {
-            let url_str =
-                "devpod://import?workspace-id=workspace&workspace-uid=uid&devpod-pro-host=devpod.pro&other=other&project=foo";
-            let request = UrlParser::parse(&url_str).unwrap();
-
-            let got: ImportWorkspaceMsg = CustomProtocol::parse(&request).unwrap();
-
-            assert_eq!(got.workspace_id, "workspace".to_string());
-            assert_eq!(got.workspace_uid, "uid".to_string());
-            assert_eq!(got.project, "foo".to_string());
-            assert_eq!(got.devpod_pro_host, "devpod.pro".to_string());
-            assert_eq!(got.options.get("other"), Some(&"other".to_string()));
-        }
-
-        #[test]
-        #[should_panic]
-        fn should_fail_on_missing_workspace_id() {
-            let url_str =
-                "devpod://import?workspace-uid=uid&devpod-pro-host=devpod.pro&other=other";
-            let request = UrlParser::parse(&url_str).unwrap();
-
-            let got: Result<ImportWorkspaceMsg, ParseError> = CustomProtocol::parse(&request);
-            got.unwrap();
-        }
-    }
-
-    mod custom_handler_pro_setup {
-        use crate::custom_protocol::SetupProMsg;
-
-        use super::super::*;
-
-        #[test]
-        fn should_parse_full() {
-            let url_str = "devpod://pro/setup?host=foo&access_key=bar";
-            let request = UrlParser::parse(&url_str).unwrap();
-
-            let got: SetupProMsg = CustomProtocol::parse(&request).unwrap();
-
-            assert_eq!(got.host, "foo".to_string());
-            assert_eq!(got.access_key, Option::Some("bar".to_string()));
-        }
-
-        #[test]
-        fn should_parse_host() {
-            let url_str = "devpod://pro/setup?host=localhost%3A8080";
-            let request = UrlParser::parse(&url_str).unwrap();
-
-            let got: SetupProMsg = CustomProtocol::parse(&request).unwrap();
-
-            assert_eq!(got.host, "localhost:8080".to_string());
-        }
-
-        #[test]
-        #[should_panic]
-        fn should_fail_on_missing_workspace_id() {
-            let url_str =
-                "devpod://import?workspace-uid=uid&devpod-pro-host=devpod.pro&other=other";
-            let request = UrlParser::parse(&url_str).unwrap();
-
-            let got: Result<ImportWorkspaceMsg, ParseError> = CustomProtocol::parse(&request);
-            got.unwrap();
         }
     }
 }

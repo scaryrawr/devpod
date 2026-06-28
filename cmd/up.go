@@ -15,7 +15,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/blang/semver"
 	"github.com/loft-sh/devpod/cmd/flags"
 	"github.com/loft-sh/devpod/pkg/agent"
 	"github.com/loft-sh/devpod/pkg/agent/tunnelserver"
@@ -33,17 +32,15 @@ import (
 	"github.com/loft-sh/devpod/pkg/ide/rstudio"
 	"github.com/loft-sh/devpod/pkg/ide/vscode"
 	"github.com/loft-sh/devpod/pkg/ide/zed"
+	"github.com/loft-sh/devpod/pkg/log"
 	open2 "github.com/loft-sh/devpod/pkg/open"
-	"github.com/loft-sh/devpod/pkg/platform"
 	"github.com/loft-sh/devpod/pkg/port"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	devssh "github.com/loft-sh/devpod/pkg/ssh"
 	"github.com/loft-sh/devpod/pkg/telemetry"
 	"github.com/loft-sh/devpod/pkg/tunnel"
 	"github.com/loft-sh/devpod/pkg/util"
-	"github.com/loft-sh/devpod/pkg/version"
 	workspace2 "github.com/loft-sh/devpod/pkg/workspace"
-	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/skratchdot/open-golang/open"
@@ -114,7 +111,7 @@ func NewUpCmd(f *flags.GlobalFlags) *cobra.Command {
 	upCmd.Flags().StringVar(&cmd.DevContainerImage, "devcontainer-image", "", "The container image to use, this will override the devcontainer.json value in the project")
 	upCmd.Flags().StringVar(&cmd.DevContainerPath, "devcontainer-path", "", "The path to the devcontainer.json relative to the project")
 	upCmd.Flags().StringArrayVar(&cmd.ProviderOptions, "provider-option", []string{}, "Provider option in the form KEY=VALUE")
-	upCmd.Flags().BoolVar(&cmd.Reconfigure, "reconfigure", false, "Reconfigure the options for this workspace. Only supported in DevPod Pro right now.")
+	upCmd.Flags().BoolVar(&cmd.Reconfigure, "reconfigure", false, "Reconfigure the options for this workspace")
 	upCmd.Flags().BoolVar(&cmd.Recreate, "recreate", false, "If true will remove any existing containers and recreate them")
 	upCmd.Flags().BoolVar(&cmd.Reset, "reset", false, "If true will remove any existing containers including sources, and recreate them")
 	upCmd.Flags().StringSliceVar(&cmd.PrebuildRepositories, "prebuild-repository", []string{}, "Docker repository that hosts devpod prebuilds for this workspace")
@@ -1288,84 +1285,6 @@ func performGpgForwarding(
 	return nil
 }
 
-// checkProviderUpdate currently only ensures the local provider is in sync with the remote for DevPod Pro instances
-// Potentially auto-upgrade other providers in the future.
-func checkProviderUpdate(devPodConfig *config.Config, proInstance *provider2.ProInstance, log log.Logger) error {
-	if version.GetVersion() == version.DevVersion {
-		log.Debugf("Skipping provider upgrade check during development")
-		return nil
-	}
-	if proInstance == nil {
-		log.Debugf("No pro instance available, skipping provider upgrade check")
-		return nil
-	}
-
-	// compare versions
-	newVersion, err := platform.GetProInstanceDevPodVersion(proInstance)
-	if err != nil {
-		return fmt.Errorf("version for pro instance %s: %w", proInstance.Host, err)
-	}
-
-	p, err := workspace2.FindProvider(devPodConfig, proInstance.Provider, log)
-	if err != nil {
-		return fmt.Errorf("get provider config for pro provider %s: %w", proInstance.Provider, err)
-	}
-	if p.Config.Version == version.DevVersion {
-		return nil
-	}
-	if p.Config.Source.Internal {
-		return nil
-	}
-
-	v1, err := semver.Parse(strings.TrimPrefix(newVersion, "v"))
-	if err != nil {
-		return fmt.Errorf("parse version %s: %w", newVersion, err)
-	}
-	v2, err := semver.Parse(strings.TrimPrefix(p.Config.Version, "v"))
-	if err != nil {
-		return fmt.Errorf("parse version %s: %w", p.Config.Version, err)
-	}
-	if v1.Compare(v2) == 0 {
-		return nil
-	}
-	log.Infof("New provider version available, attempting to update %s from %s to %s", proInstance.Provider, p.Config.Version, newVersion)
-
-	providerSource, err := workspace2.ResolveProviderSource(devPodConfig, proInstance.Provider, log)
-	if err != nil {
-		return fmt.Errorf("resolve provider source %s: %w", proInstance.Provider, err)
-	}
-
-	splitted := strings.Split(providerSource, "@")
-	if len(splitted) == 0 {
-		return fmt.Errorf("no provider source found %s", providerSource)
-	}
-	providerSource = splitted[0] + "@" + newVersion
-
-	_, err = workspace2.UpdateProvider(devPodConfig, proInstance.Provider, providerSource, log)
-	if err != nil {
-		return fmt.Errorf("update provider %s: %w", proInstance.Provider, err)
-	}
-
-	log.Donef("Successfully updated provider %s", proInstance.Provider)
-	return nil
-}
-
-func getProInstance(devPodConfig *config.Config, providerName string, log log.Logger) *provider2.ProInstance {
-	proInstances, err := workspace2.ListProInstances(devPodConfig, log)
-	if err != nil {
-		return nil
-	} else if len(proInstances) == 0 {
-		return nil
-	}
-
-	proInstance, ok := workspace2.FindProviderProInstance(proInstances, providerName)
-	if !ok {
-		return nil
-	}
-
-	return proInstance
-}
-
 func (cmd *UpCmd) prepareClient(ctx context.Context, devPodConfig *config.Config, args []string) (client2.BaseWorkspaceClient, log.Logger, error) {
 	// try to parse flags from env
 	if err := mergeDevPodUpOptions(&cmd.CLIOptions); err != nil {
@@ -1421,14 +1340,6 @@ func (cmd *UpCmd) prepareClient(ctx context.Context, devPodConfig *config.Config
 	)
 	if err != nil {
 		return nil, logger, err
-	}
-
-	if !cmd.Platform.Enabled {
-		proInstance := getProInstance(devPodConfig, client.Provider(), logger)
-		err = checkProviderUpdate(devPodConfig, proInstance, logger)
-		if err != nil {
-			return nil, logger, err
-		}
 	}
 
 	return client, logger, nil

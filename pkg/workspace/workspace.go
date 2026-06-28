@@ -11,18 +11,17 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/loft-sh/devpod/pkg/client"
 	"github.com/loft-sh/devpod/pkg/client/clientimplementation"
-	"github.com/loft-sh/devpod/pkg/client/clientimplementation/daemonclient"
 	"github.com/loft-sh/devpod/pkg/config"
 	"github.com/loft-sh/devpod/pkg/encoding"
 	"github.com/loft-sh/devpod/pkg/file"
 	"github.com/loft-sh/devpod/pkg/git"
 	"github.com/loft-sh/devpod/pkg/ide/ideparse"
 	"github.com/loft-sh/devpod/pkg/image"
+	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/log/terminal"
 	"github.com/loft-sh/devpod/pkg/platform"
 	providerpkg "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/devpod/pkg/log"
-	"github.com/loft-sh/devpod/pkg/log/terminal"
 )
 
 // Resolve takes the `devpod up|build` CLI input and either finds an existing workspace or creates a new one
@@ -125,8 +124,6 @@ func Resolve(
 func getWorkspaceClient(devPodConfig *config.Config, provider *providerpkg.ProviderConfig, workspace *providerpkg.Workspace, machine *providerpkg.Machine, log log.Logger) (client.BaseWorkspaceClient, error) {
 	if provider.IsProxyProvider() {
 		return clientimplementation.NewProxyClient(devPodConfig, provider, workspace, log)
-	} else if provider.IsDaemonProvider() {
-		return daemonclient.New(devPodConfig, provider, workspace, log)
 	} else {
 		return clientimplementation.NewWorkspaceClient(devPodConfig, provider, workspace, machine, log)
 	}
@@ -348,17 +345,15 @@ func createWorkspace(
 				return nil, nil, nil, fmt.Errorf("load machine config: %w", err)
 			}
 		}
-	} else if provider.Config.IsProxyProvider() || provider.Config.IsDaemonProvider() {
-		// We'll do have to do a bit of mumbo jumbo here because the pro process can't communicate with us directly.
-		// It needs os i/o to render the form in CLI mode so we can't go with our typical setup.
-		// Instead we first save the config, tell the provider where it lives, it updates it,
-		// then we read it again and update to workspace state here
+	} else if provider.Config.IsProxyProvider() {
+		// Proxy providers render forms through their subprocess, so save the
+		// initial workspace first and reload it after the provider updates it.
 		err = providerpkg.SaveWorkspaceConfig(workspace)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("save config: %w", err)
 		}
 
-		err := resolveProInstance(ctx, devPodConfig, provider.Config.Name, workspace, log)
+		err := resolveProxyWorkspace(ctx, devPodConfig, provider.Config.Name, workspace, log)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -494,7 +489,7 @@ func findLocalWorkspace(ctx context.Context, devPodConfig *config.Config, args [
 		return nil
 	}
 
-	allWorkspaces, err := ListLocalWorkspaces(devPodConfig.DefaultContext, false, log)
+	allWorkspaces, err := ListLocalWorkspaces(devPodConfig.DefaultContext, log)
 	if err != nil {
 		log.Debugf("failed to list workspaces: %v", err)
 		return nil
@@ -529,15 +524,6 @@ func findWorkspace(ctx context.Context, devPodConfig *config.Config, args []stri
 			continue
 		}
 
-		if workspace.IsPro() {
-			workspace.Imported = true
-			err = providerpkg.SaveWorkspaceConfig(workspace)
-			if err != nil {
-				log.Debugf("failed to save workspace config for workspace \"%s\" with provider \"%s\": %v", workspace.ID, workspace.Provider.Name, err)
-				return nil
-			}
-		}
-
 		retWorkspace = workspace
 		break
 	}
@@ -564,9 +550,6 @@ func selectWorkspace(ctx context.Context, devPodConfig *config.Config, changeLas
 	options := []huh.Option[*providerpkg.Workspace]{}
 	for _, workspace := range workspaces {
 		key := workspace.ID
-		if workspace.IsPro() && workspace.Pro.DisplayName != "" {
-			key = fmt.Sprintf("%s (%s)", workspace.Pro.DisplayName, workspace.ID)
-		}
 		options = append(options, huh.NewOption(key, workspace))
 	}
 	if len(workspaces) == 0 {
@@ -588,26 +571,6 @@ func selectWorkspace(ctx context.Context, devPodConfig *config.Config, changeLas
 	}
 	if selectedWorkspace == nil {
 		return nil, nil, nil, fmt.Errorf("no workspace selected")
-	}
-
-	// if selected workspace is pro, save config locally
-	for _, workspace := range workspaces {
-		if workspace.ID == selectedWorkspace.ID && workspace.IsPro() {
-			if workspace.SSHConfigPath == "" && sshConfigPath != "" {
-				workspace.SSHConfigPath = sshConfigPath
-			}
-			workspace.Imported = true
-			if err := providerpkg.SaveWorkspaceConfig(workspace); err != nil {
-				return nil, nil, nil, fmt.Errorf("save workspace config for workspace \"%s\": %w", workspace.ID, err)
-			}
-
-			providerConfig, err := providerpkg.LoadProviderConfig(devPodConfig.DefaultContext, workspace.Provider.Name)
-			if err != nil {
-				return nil, nil, nil, fmt.Errorf("load provider config for workspace \"%s\" with provider \"%s\": %w", workspace.ID, workspace.Provider.Name, err)
-			}
-
-			return providerConfig, workspace, nil, nil
-		}
 	}
 
 	// load workspace
@@ -647,7 +610,7 @@ func loadExistingWorkspace(devPodConfig *config.Config, workspaceID string, chan
 	return providerWithOptions.Config, workspaceConfig, machineConfig, nil
 }
 
-func resolveProInstance(ctx context.Context, devPodConfig *config.Config, providerName string, workspace *providerpkg.Workspace, log log.Logger) error {
+func resolveProxyWorkspace(ctx context.Context, devPodConfig *config.Config, providerName string, workspace *providerpkg.Workspace, log log.Logger) error {
 	provider, err := FindProvider(devPodConfig, providerName, log)
 	if err != nil {
 		return err
@@ -660,8 +623,6 @@ func resolveProInstance(ctx context.Context, devPodConfig *config.Config, provid
 
 	switch c := workspaceClient.(type) {
 	case client.ProxyClient:
-		return c.Create(ctx, os.Stdin, os.Stdout, os.Stderr)
-	case client.DaemonClient:
 		return c.Create(ctx, os.Stdin, os.Stdout, os.Stderr)
 	default:
 		return fmt.Errorf("client does not support remote workspaces")

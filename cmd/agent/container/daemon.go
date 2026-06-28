@@ -16,8 +16,6 @@ import (
 	"github.com/loft-sh/devpod/pkg/agent"
 	agentd "github.com/loft-sh/devpod/pkg/daemon/agent"
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
-	"github.com/loft-sh/devpod/pkg/platform/client"
-	"github.com/loft-sh/devpod/pkg/ts"
 	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -83,13 +81,6 @@ func (cmd *DaemonCmd) Run(c *cobra.Command, args []string) error {
 	if os.Getpid() == 1 {
 		wg.Add(1)
 		go runReaper(ctx, errChan, &wg)
-	}
-
-	// Start Tailscale networking server.
-	if cmd.shouldRunNetworkServer() {
-		tasksStarted = true
-		wg.Add(1)
-		go runNetworkServer(ctx, cmd, errChan, &wg)
 	}
 
 	// Start timeout monitor.
@@ -166,13 +157,6 @@ func (cmd *DaemonCmd) loadConfig() error {
 	return nil
 }
 
-// shouldRunNetworkServer returns true if the required platform parameters are present.
-func (cmd *DaemonCmd) shouldRunNetworkServer() bool {
-	return cmd.Config.Platform.AccessKey != "" &&
-		cmd.Config.Platform.PlatformHost != "" &&
-		cmd.Config.Platform.WorkspaceHost != ""
-}
-
 // shouldRunSsh returns true if at least one SSH configuration value is provided.
 func (cmd *DaemonCmd) shouldRunSsh() bool {
 	return cmd.Config.Ssh.Workdir != "" || cmd.Config.Ssh.User != ""
@@ -212,38 +196,6 @@ func runTimeoutMonitor(ctx context.Context, duration time.Duration, errChan chan
 				return
 			}
 		}
-	}
-}
-
-// runNetworkServer starts the network server.
-func runNetworkServer(ctx context.Context, cmd *DaemonCmd, errChan chan<- error, wg *sync.WaitGroup) {
-	defer wg.Done()
-	if err := os.MkdirAll(RootDir, os.ModePerm); err != nil {
-		errChan <- err
-		return
-	}
-	logger := initLogging()
-	config := client.NewConfig()
-	config.AccessKey = cmd.Config.Platform.AccessKey
-	config.Host = "https://" + cmd.Config.Platform.PlatformHost
-	config.Insecure = true
-	baseClient := client.NewClientFromConfig(config)
-	if err := baseClient.RefreshSelf(ctx); err != nil {
-		errChan <- fmt.Errorf("failed to refresh client: %w", err)
-		return
-	}
-	tsServer := ts.NewWorkspaceServer(&ts.WorkspaceServerConfig{
-		AccessKey:     cmd.Config.Platform.AccessKey,
-		PlatformHost:  ts.RemoveProtocol(cmd.Config.Platform.PlatformHost),
-		WorkspaceHost: cmd.Config.Platform.WorkspaceHost,
-		Client:        baseClient,
-		RootDir:       RootDir,
-		LogF: func(format string, args ...interface{}) {
-			logger.Infof(format, args...)
-		},
-	}, logger)
-	if err := tsServer.Start(ctx); err != nil {
-		errChan <- fmt.Errorf("network server: %w", err)
 	}
 }
 

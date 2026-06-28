@@ -3,9 +3,9 @@
 use crate::AppHandle;
 use log::error;
 use serde::Serialize;
+use std::env;
 use tauri_plugin_store::StoreExt;
 use ts_rs::TS;
-use std::env;
 
 const SETTINGS_FILE_NAME: &str = ".settings.json";
 
@@ -46,8 +46,6 @@ pub struct Settings {
     experimental_positron: bool,
     #[serde(rename = "experimental_rstudio")]
     experimental_rstudio: bool,
-    #[serde(rename = "experimental_devPodPro")]
-    experimental_devpod_pro: bool,
     #[serde(rename = "experimental_colorMode")]
     experimental_color_mode: ColorMode,
 }
@@ -93,7 +91,7 @@ impl Settings {
             Err(_) => is_flatpak = false,
         }
         if is_flatpak {
-            return false
+            return false;
         }
 
         store

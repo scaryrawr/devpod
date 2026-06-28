@@ -9,8 +9,8 @@ import (
 	"github.com/loft-sh/devpod/cmd/flags"
 	client2 "github.com/loft-sh/devpod/pkg/client"
 	"github.com/loft-sh/devpod/pkg/config"
-	workspace2 "github.com/loft-sh/devpod/pkg/workspace"
 	"github.com/loft-sh/devpod/pkg/log"
+	workspace2 "github.com/loft-sh/devpod/pkg/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -24,7 +24,7 @@ func NewPingCmd(flags *flags.GlobalFlags) *cobra.Command {
 	}
 	troubleshootCmd := &cobra.Command{
 		Use:   "ping [workspace-path|workspace-name]",
-		Short: "Pings the DevPod Pro workspace",
+		Short: "Pings the DevPod workspace",
 		RunE: func(cobraCmd *cobra.Command, args []string) error {
 			return cmd.Run(cobraCmd.Context(), args)
 		},

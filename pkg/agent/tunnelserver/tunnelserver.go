@@ -19,12 +19,10 @@ import (
 	"github.com/loft-sh/devpod/pkg/gitcredentials"
 	"github.com/loft-sh/devpod/pkg/gitsshsigning"
 	"github.com/loft-sh/devpod/pkg/gpg"
-	"github.com/loft-sh/devpod/pkg/loftconfig"
+	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/loft-sh/devpod/pkg/netstat"
-	"github.com/loft-sh/devpod/pkg/platform"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/stdio"
-	"github.com/loft-sh/devpod/pkg/log"
 	"github.com/moby/patternmatcher/ignorefile"
 	perrors "github.com/pkg/errors"
 	"google.golang.org/grpc"
@@ -281,31 +279,7 @@ func (t *tunnelServer) GitSSHSignature(ctx context.Context, message *tunnel.Mess
 }
 
 func (t *tunnelServer) LoftConfig(ctx context.Context, message *tunnel.Message) (*tunnel.Message, error) {
-	loftConfigRequest := &loftconfig.LoftConfigRequest{}
-	err := json.Unmarshal([]byte(message.Message), loftConfigRequest)
-	if err != nil {
-		return nil, perrors.Wrap(err, "loft platform config request")
-	}
-
-	var response *loftconfig.LoftConfigResponse
-	if t.workspace != nil {
-		response, err = loftconfig.ReadFromWorkspace(t.workspace)
-		if err != nil {
-			return nil, fmt.Errorf("read loft config: %w", err)
-		}
-	} else {
-		response, err = loftconfig.Read(loftConfigRequest)
-		if err != nil {
-			return nil, fmt.Errorf("read loft config: %w", err)
-		}
-	}
-
-	out, err := json.Marshal(response)
-	if err != nil {
-		return nil, err
-	}
-
-	return &tunnel.Message{Message: string(out)}, nil
+	return &tunnel.Message{Message: "{}"}, nil
 }
 
 func (t *tunnelServer) KubeConfig(ctx context.Context, message *tunnel.Message) (*tunnel.Message, error) {
@@ -313,12 +287,7 @@ func (t *tunnelServer) KubeConfig(ctx context.Context, message *tunnel.Message) 
 		return nil, fmt.Errorf("kube config forbidden")
 	}
 
-	kubeConfig, err := platform.NewInstanceKubeConfig(ctx, t.platformOptions)
-	if err != nil {
-		return nil, fmt.Errorf("create kube config: %w", err)
-	}
-
-	return &tunnel.Message{Message: string(kubeConfig)}, nil
+	return &tunnel.Message{}, nil
 }
 
 func (t *tunnelServer) GPGPublicKeys(ctx context.Context, message *tunnel.Message) (*tunnel.Message, error) {

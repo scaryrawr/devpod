@@ -10,8 +10,8 @@ import (
 	"github.com/loft-sh/analytics-client/client"
 	devpodclient "github.com/loft-sh/devpod/pkg/client"
 	"github.com/loft-sh/devpod/pkg/config"
-	"github.com/loft-sh/devpod/pkg/version"
 	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/version"
 	"github.com/moby/term"
 	"github.com/spf13/cobra"
 )
@@ -31,9 +31,6 @@ var UIEventsExceptions []string = []string{
 	"devpod list",
 	"devpod status",
 	"devpod provider list",
-	"devpod pro list",
-	"devpod pro check-health",
-	"devpod pro check-update",
 	"devpod ide list",
 	"devpod ide use",
 	"devpod provider use",
@@ -41,7 +38,6 @@ var UIEventsExceptions []string = []string{
 	"devpod context options",
 }
 
-// skip everything in pro mode
 var CollectorCLI CLICollector = &noopCollector{}
 
 type CLICollector interface {

@@ -16,6 +16,8 @@ import (
 
 const LoftTSNetDomain = "ts.loft"
 
+const RunnerProxySocket = "runner-proxy.sock"
+
 func GetClientHostname(userName string) (string, error) {
 	osHostname, err := os.Hostname()
 	if err != nil {
