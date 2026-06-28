@@ -3,6 +3,7 @@
 ## Build, test, and lint commands
 
 - CLI build: `CGO_ENABLED=0 go build -ldflags "-s -w" -o devpod-cli`
+- Local release-like install: `go install -ldflags "-s -w -X github.com/loft-sh/devpod/pkg/version.version=v0.0.1" .`; plain `go install .` leaves `version.GetVersion()` at `v0.0.0` and uses the fork's latest release agent URL instead of a versioned release URL.
 - Repo build helper: `make build` or `./hack/rebuild.sh` (may ask for sudo); build variables include `SKIP_INSTALL`, `BUILD_PLATFORMS`, and `BUILD_ARCHS`.
 - Full Go unit test workflow: `./hack/unit-tests.sh`. This runs `go generate ./...`, builds `main.go` with `GOFLAGS=-mod=vendor`, then runs package tests with race and coverage.
 - Single Go test/package: `GOFLAGS=-mod=vendor go test ./pkg/git -run TestNormalizeRepository` or `GOFLAGS=-mod=vendor go test ./pkg/devcontainer/config -run TestName`.
