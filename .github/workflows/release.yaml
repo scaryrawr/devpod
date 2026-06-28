@@ -126,18 +126,12 @@ jobs:
           (cd dist && shasum -a 256 * > checksums.txt)
 
       - name: Create or update GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-        run: |
-          set -euo pipefail
-
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$TAG" \
-              --notes "DevPod CLI release $TAG"
-          fi
-
-          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
