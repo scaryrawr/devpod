@@ -8,7 +8,7 @@
 - Single Go test/package: `GOFLAGS=-mod=vendor go test ./pkg/git -run TestNormalizeRepository` or `GOFLAGS=-mod=vendor go test ./pkg/devcontainer/config -run TestName`.
 - E2E setup: from `e2e/`, run `BUILDDIR=bin SRCDIR=".." ../hack/build-e2e.sh` before tests.
 - E2E tests: from `e2e/`, run `go test -v -ginkgo.v -timeout 3600s --ginkgo.label-filter=up-docker` for a label, or `go run github.com/onsi/ginkgo/v2/ginkgo -r --label-filter=build` on Windows-style workflows.
-- CI runs a vendored Go CLI build plus focused Go tests; release tags build CLI assets for `scaryrawr/devpod` GitHub releases.
+- CI runs a vendored Go CLI build plus focused Go tests; release tags build CLI assets for `scaryrawr/devpod` GitHub releases and publish them with `softprops/action-gh-release`.
 - Release CLI builds use `CGO_ENABLED=0`; `zig cc`/`zig c++` are not involved. Windows named pipe code uses the already-vendored `github.com/Microsoft/go-winio`, so Windows amd64 and arm64 CLI assets can be cross-compiled without `gopkg.in/natefinch/npipe.v2`.
 - Desktop install/build/checks: from `desktop/`, use `yarn install --frozen-lockfile`, `yarn build`, `yarn lint:ci`, `yarn format:check`, and `yarn types:check`.
 - Desktop app dev/build: from `desktop/`, use `yarn desktop:dev:debug`, `yarn desktop:build`, or `yarn tauri build --config src-tauri/tauri-dev.conf.json`.
