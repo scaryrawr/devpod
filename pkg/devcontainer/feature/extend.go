@@ -264,6 +264,8 @@ func fetchFeatures(devContainerConfig *config.DevContainerConfig, log log.Logger
 }
 
 func NormalizeFeatureID(featureID string) string {
+	featureID = normalizeOCIFeatureReference(featureID)
+
 	ref, err := name.ParseReference(featureID)
 	if err != nil {
 		return featureID

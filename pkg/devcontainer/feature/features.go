@@ -102,7 +102,15 @@ func ProcessFeatureID(id string, devContainerConfig *config.DevContainerConfig, 
 
 	// get oci feature
 	log.Debugf("Process OCI feature")
-	return processOCIFeature(id, log)
+	return processOCIFeature(normalizeOCIFeatureReference(id), log)
+}
+
+func normalizeOCIFeatureReference(id string) string {
+	if strings.HasSuffix(id, ":") && !strings.Contains(id, "@") {
+		return strings.TrimSuffix(id, ":")
+	}
+
+	return id
 }
 
 func processOCIFeature(id string, log log.Logger) (string, error) {
