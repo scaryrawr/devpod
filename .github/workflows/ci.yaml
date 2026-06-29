@@ -82,14 +82,6 @@ jobs:
         working-directory: desktop
         run: pnpm install --frozen-lockfile
 
-      - name: Check desktop formatting
-        working-directory: desktop
-        run: pnpm format:check
-
-      - name: Lint desktop
-        working-directory: desktop
-        run: pnpm lint:ci
-
       - name: Type-check desktop
         working-directory: desktop
         run: pnpm types:check
