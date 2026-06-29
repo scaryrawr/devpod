@@ -9,11 +9,11 @@
 - Single Go test/package: `GOFLAGS=-mod=vendor go test ./pkg/git -run TestNormalizeRepository` or `GOFLAGS=-mod=vendor go test ./pkg/devcontainer/config -run TestName`.
 - E2E setup: from `e2e/`, run `BUILDDIR=bin SRCDIR=".." ../hack/build-e2e.sh` before tests.
 - E2E tests: from `e2e/`, run `go test -v -ginkgo.v -timeout 3600s --ginkgo.label-filter=up-docker` for a label, or `go run github.com/onsi/ginkgo/v2/ginkgo -r --label-filter=build` on Windows-style workflows.
-- CI runs a vendored Go CLI build plus focused Go tests; release tags build CLI assets for `scaryrawr/devpod` GitHub releases and publish them with `softprops/action-gh-release`.
+- CI runs a vendored Go CLI build plus focused Go tests, and also builds/checks the Tauri desktop app on Linux. Release tags build CLI assets plus Linux, macOS, and Windows desktop assets for `scaryrawr/devpod` GitHub releases and publish them with `softprops/action-gh-release`.
 - Release CLI builds use `CGO_ENABLED=0`; `zig cc`/`zig c++` are not involved. Windows named pipe code uses the already-vendored `github.com/Microsoft/go-winio`, so Windows amd64 and arm64 CLI assets can be cross-compiled without `gopkg.in/natefinch/npipe.v2`.
 - Desktop install/build/checks: from `desktop/`, use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm lint:ci`, `pnpm format:check`, and `pnpm types:check`.
 - Desktop app dev/build: from `desktop/`, use `pnpm desktop:dev:debug`, `pnpm desktop:build`, or `pnpm tauri build --config src-tauri/tauri-dev.conf.json`.
-- The desktop app bundles the Go CLI as a Tauri `externalBin` sidecar at `desktop/src-tauri/bin/devpod-cli-<rust-host-triple>`. `pnpm desktop:dev`/`desktop:build` auto-build it via `pnpm cli:build` (`desktop/scripts/build-cli.mjs`); a Rust-only `cargo check` still needs it built manually (run `pnpm cli:build`). Without it the build fails with `resource path bin/devpod-cli-... doesn't exist`. `bin/` is gitignored except `.gitkeep`.
+- The desktop app bundles the Go CLI as a Tauri `externalBin` sidecar at `desktop/src-tauri/bin/devpod-cli-<target-triple>`. `pnpm desktop:dev`/`desktop:build` auto-build it via `pnpm cli:build` (`desktop/scripts/build-cli.mjs`); release workflows set `TAURI_TARGET_TRIPLE` and `DEVPOD_VERSION` for cross-target sidecars. A Rust-only `cargo check` still needs it built manually (run `pnpm cli:build`). Without it the build fails with `resource path bin/devpod-cli-... doesn't exist`. `bin/` is gitignored except `.gitkeep`.
 - Desktop frontend CLI flags must match the current CLI: command flags are sent literally and an unknown flag aborts the call. After Pro removal there is no `--skip-pro`; `client.workspaces.listAll()` must not pass it.
 - Docs: from `docs/`, use `yarn start` and `yarn build`.
 

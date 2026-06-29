@@ -1,4 +1,4 @@
-name: Release CLI
+name: Release
 
 on:
   push:
@@ -106,11 +106,141 @@ jobs:
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
+  desktop:
+    name: Build desktop ${{ matrix.asset }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: desktop-linux-amd64
+            bundles: appimage,deb
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            asset: desktop-darwin-amd64
+            bundles: dmg
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            asset: desktop-darwin-arm64
+            bundles: dmg
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: desktop-windows-amd64
+            bundles: nsis,msi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: desktop/.nvmrc
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Build desktop app
+        shell: bash
+        working-directory: desktop
+        env:
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          TAURI_TARGET_TRIPLE: ${{ matrix.target }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is required to create signed desktop updater artifacts." >&2
+            exit 1
+          fi
+
+          app_version="${VERSION#v}"
+          DEVPOD_VERSION="$VERSION" pnpm cli:build
+          pnpm tauri build \
+            --ci \
+            --no-sign \
+            --target "$TAURI_TARGET_TRIPLE" \
+            --bundles "${{ matrix.bundles }}" \
+            --config "{\"version\":\"$app_version\"}"
+
+      - name: Collect desktop release assets
+        shell: bash
+        working-directory: desktop
+        env:
+          ASSET: ${{ matrix.asset }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          bundle_dir="src-tauri/target/${TARGET}/release/bundle"
+          mkdir -p ../dist
+          find "$bundle_dir" -type f \( \
+            -name "*.AppImage" -o \
+            -name "*.AppImage.tar.gz" -o \
+            -name "*.deb" -o \
+            -name "*.dmg" -o \
+            -name "*.app.tar.gz" -o \
+            -name "*.msi" -o \
+            -name "*setup.exe" -o \
+            -name "*.zip" -o \
+            -name "*.sig" -o \
+            -name "*.json" \
+          \) -print0 | while IFS= read -r -d '' file; do
+            cp "$file" "../dist/${ASSET}-$(basename "$file")"
+          done
+
+          if ! find ../dist -maxdepth 1 -type f -print -quit | grep -q .; then
+            echo "No desktop release assets were produced in ${bundle_dir}" >&2
+            exit 1
+          fi
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-asset-${{ matrix.asset }}
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
     needs:
       - prepare
       - build
+      - desktop
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
@@ -119,6 +249,77 @@ jobs:
           pattern: release-asset-*
           path: dist
           merge-multiple: true
+
+      - name: Generate desktop updater manifest
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const fs = require("node:fs")
+          const path = require("node:path")
+
+          const dist = "dist"
+          const files = fs.readdirSync(dist)
+          const tag = process.env.TAG
+          const releaseBase = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${encodeURIComponent(tag)}/`
+          const platforms = [
+            {
+              key: "linux-x86_64",
+              prefix: "desktop-linux-amd64-",
+              updaterSuffixes: [".AppImage.tar.gz"],
+            },
+            {
+              key: "darwin-x86_64",
+              prefix: "desktop-darwin-amd64-",
+              updaterSuffixes: [".app.tar.gz"],
+            },
+            {
+              key: "darwin-aarch64",
+              prefix: "desktop-darwin-arm64-",
+              updaterSuffixes: [".app.tar.gz"],
+            },
+            {
+              key: "windows-x86_64",
+              prefix: "desktop-windows-amd64-",
+              updaterSuffixes: [".msi.zip", ".nsis.zip"],
+            },
+          ]
+
+          function updaterAsset({ prefix, updaterSuffixes }) {
+            for (const suffix of updaterSuffixes) {
+              const sigFile = files.find((file) => file.startsWith(prefix) && file.endsWith(`${suffix}.sig`))
+              if (!sigFile) {
+                continue
+              }
+
+              const bundleFile = sigFile.slice(0, -".sig".length)
+              if (files.includes(bundleFile)) {
+                return { bundleFile, sigFile }
+              }
+            }
+
+            throw new Error(`missing updater bundle and signature for ${prefix}`)
+          }
+
+          const manifest = {
+            version: tag.replace(/^v/, ""),
+            pub_date: new Date().toISOString(),
+            platforms: {},
+          }
+
+          for (const platform of platforms) {
+            const { bundleFile, sigFile } = updaterAsset(platform)
+            manifest.platforms[platform.key] = {
+              signature: fs.readFileSync(path.join(dist, sigFile), "utf8").trim(),
+              url: `${releaseBase}${encodeURIComponent(bundleFile)}`,
+            }
+          }
+
+          fs.writeFileSync(path.join(dist, "latest.json"), `${JSON.stringify(manifest, null, 2)}\n`)
+          NODE
 
       - name: Generate checksums
         run: |

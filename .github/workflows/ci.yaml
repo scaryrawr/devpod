@@ -36,3 +36,66 @@ jobs:
 
       - name: Test
         run: go test ./pkg/agent ./pkg/devcontainer/sshtunnel
+
+  desktop:
+    name: Desktop build
+    runs-on: ubuntu-22.04
+    env:
+      CGO_ENABLED: "0"
+      GOFLAGS: -mod=vendor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: desktop/.nvmrc
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            wget
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Check desktop formatting
+        working-directory: desktop
+        run: pnpm format:check
+
+      - name: Lint desktop
+        working-directory: desktop
+        run: pnpm lint:ci
+
+      - name: Type-check desktop
+        working-directory: desktop
+        run: pnpm types:check
+
+      - name: Build desktop app
+        working-directory: desktop
+        run: |
+          pnpm cli:build
+          pnpm tauri build --config src-tauri/tauri-dev.conf.json --ci --no-sign
