@@ -83,7 +83,7 @@ export function useAppReady() {
 
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (event.type === "OpenWorkspace") {
-        const workspacesResult = await client.workspaces.listAll(false)
+        const workspacesResult = await client.workspaces.listAll()
         if (workspacesResult.err) {
           return
         }
