@@ -1,0 +1,11 @@
+# pnpm configuration (pnpm 11 reads project settings from here, not package.json/.npmrc)
+
+# Pin exact versions when adding dependencies (replaces .npmrc save-exact=true)
+savePrefix: ""
+
+overrides:
+  lodash: 4.17.21
+
+# Dependencies whose install/build scripts are explicitly reviewed and allowed
+allowBuilds:
+  esbuild: true

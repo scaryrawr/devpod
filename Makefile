@@ -10,4 +10,4 @@ build:
 # Run the desktop app
 .PHONY: run-desktop
 run-desktop: build
-	cd desktop && yarn desktop:dev:debug
+	cd desktop && pnpm desktop:dev:debug

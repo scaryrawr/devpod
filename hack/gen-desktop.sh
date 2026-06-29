@@ -28,6 +28,6 @@ printf "Done\n"
 
 echo "Formatting generated types..."
 cd desktop
-yarn prettier --write src/gen --log-level silent
+pnpm exec prettier --write src/gen --log-level silent
 cd ..
 printf "Done\n"

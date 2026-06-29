@@ -11,8 +11,8 @@
 - E2E tests: from `e2e/`, run `go test -v -ginkgo.v -timeout 3600s --ginkgo.label-filter=up-docker` for a label, or `go run github.com/onsi/ginkgo/v2/ginkgo -r --label-filter=build` on Windows-style workflows.
 - CI runs a vendored Go CLI build plus focused Go tests; release tags build CLI assets for `scaryrawr/devpod` GitHub releases and publish them with `softprops/action-gh-release`.
 - Release CLI builds use `CGO_ENABLED=0`; `zig cc`/`zig c++` are not involved. Windows named pipe code uses the already-vendored `github.com/Microsoft/go-winio`, so Windows amd64 and arm64 CLI assets can be cross-compiled without `gopkg.in/natefinch/npipe.v2`.
-- Desktop install/build/checks: from `desktop/`, use `yarn install --frozen-lockfile`, `yarn build`, `yarn lint:ci`, `yarn format:check`, and `yarn types:check`.
-- Desktop app dev/build: from `desktop/`, use `yarn desktop:dev:debug`, `yarn desktop:build`, or `yarn tauri build --config src-tauri/tauri-dev.conf.json`.
+- Desktop install/build/checks: from `desktop/`, use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm lint:ci`, `pnpm format:check`, and `pnpm types:check`.
+- Desktop app dev/build: from `desktop/`, use `pnpm desktop:dev:debug`, `pnpm desktop:build`, or `pnpm tauri build --config src-tauri/tauri-dev.conf.json`.
 - Rust-only desktop checks may need a CLI resource first: build the CLI, then temporarily copy it to `desktop/src-tauri/bin/devpod-cli-$(rustc -Vv | awk '/host:/ {print $2}')` before running `cargo check` from `desktop/src-tauri/`.
 - Docs: from `docs/`, use `yarn start` and `yarn build`.
 
@@ -39,4 +39,4 @@
 - E2E tests use Ginkgo labels through helper wrappers like `DevPodDescribe("[label] ...")`; choose labels that match the CI matrix (`build`, `ide`, `integration`, `machine`, `machineprovider`, `provider`, `ssh`, `up`, `up-docker`, `up-podman`, `up-docker-compose`, `up-docker-build`, `up-docker-compose-build`, `context`).
 - Desktop frontend state favors React Query and context providers under `desktop/src/contexts`; command execution and Tauri interactions should go through typed client classes under `desktop/src/client`.
 - Keep Rust/TypeScript event payloads synchronized. `desktop/src/client/client.ts` explicitly notes that channel payload types must match the Rust types.
-- Desktop package management uses Yarn 1 (`packageManager: yarn@1.22.19`); do not use npm or pnpm for desktop lockfile changes.
+- Desktop package management uses pnpm (`packageManager: pnpm@11.9.0`) on Node 24 (`desktop/.nvmrc`); do not use npm or yarn for desktop lockfile changes. pnpm 11 reads project settings only from `desktop/pnpm-workspace.yaml` (not the `package.json` `pnpm` field, and only auth/registry from `.npmrc`): `overrides` replaces yarn `resolutions`, dependency build scripts must be approved via `allowBuilds` (e.g. `esbuild: true`), and `savePrefix: ""` pins exact versions. pnpm 11 also defaults `minimumReleaseAge` to 1440 (1-day supply-chain delay) — keep it unless a freshly published, already-locked dep must be allowed.

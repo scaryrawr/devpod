@@ -3,3 +3,6 @@
 /.vscode
 /dist
 
+# Auto-generated / non-source files
+pnpm-lock.yaml
+.nvmrc

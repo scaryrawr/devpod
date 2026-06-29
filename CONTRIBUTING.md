@@ -25,7 +25,7 @@ Once installed, run
 
 Prerequisites GUI:
 
-- [NodeJS + yarn](https://nodejs.org/en/)
+- [NodeJS 24 + pnpm](https://nodejs.org/en/)
 - [Rust](https://www.rust-lang.org/tools/install)
 - [Go](https://go.dev/doc/install)
 
@@ -42,7 +42,7 @@ sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev \
 Once installed, run
 
 - `cd desktop`
-- `yarn tauri build --config src-tauri/tauri-dev.conf.json`
+- `pnpm tauri build --config src-tauri/tauri-dev.conf.json`
 
 The application should be in `desktop/src-tauri/target/release`
 
