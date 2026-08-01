@@ -229,9 +229,10 @@ type CLIOptions struct {
 	Platforms  []string `json:"platform,omitempty"`
 	Tag        []string `json:"tag,omitempty"`
 
-	ForceBuild            bool `json:"forceBuild,omitempty"`
-	ForceDockerless       bool `json:"forceDockerless,omitempty"`
-	ForceInternalBuildKit bool `json:"forceInternalBuildKit,omitempty"`
+	ForceBuild            bool   `json:"forceBuild,omitempty"`
+	ForceDockerless       bool   `json:"forceDockerless,omitempty"`
+	ForceInternalBuildKit bool   `json:"forceInternalBuildKit,omitempty"`
+	NPMRegistry           string `json:"npmRegistry,omitempty"`
 }
 
 type BuildOptions struct {

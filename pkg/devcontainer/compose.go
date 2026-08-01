@@ -332,7 +332,7 @@ func (r *runner) startContainer(
 	}
 
 	if container == nil || !didRestoreFromPersistedShare {
-		overrideBuildImageName, overrideComposeBuildFilePath, imageMetadata, metadataLabel, err := r.buildAndExtendDockerCompose(ctx, parsedConfig, substitutionContext, project, composeHelper, &composeService, composeGlobalArgs)
+		overrideBuildImageName, overrideComposeBuildFilePath, imageMetadata, metadataLabel, err := r.buildAndExtendDockerCompose(ctx, parsedConfig, substitutionContext, project, composeHelper, &composeService, composeGlobalArgs, options.NPMRegistry)
 		if err != nil {
 			return nil, errors.Wrap(err, "build and extend docker-compose")
 		}
@@ -466,6 +466,7 @@ func (r *runner) buildAndExtendDockerCompose(
 	composeHelper *compose.ComposeHelper,
 	composeService *composetypes.ServiceConfig,
 	globalArgs []string,
+	npmRegistry string,
 ) (string, string, *config.ImageMetadataConfig, string, error) {
 	var dockerFilePath, dockerfileContents, dockerComposeFilePath string
 	var imageBuildInfo *config.ImageBuildInfo
@@ -484,7 +485,7 @@ func (r *runner) buildAndExtendDockerCompose(
 		return "", "", nil, "", err
 	}
 
-	extendImageBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, buildTarget, parsedConfig, r.Log, false)
+	extendImageBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, buildTarget, parsedConfig, r.Log, false, npmRegistry)
 	if err != nil {
 		return "", "", nil, "", err
 	}

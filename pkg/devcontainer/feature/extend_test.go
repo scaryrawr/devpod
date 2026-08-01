@@ -1,6 +1,8 @@
 package feature
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/loft-sh/devpod/pkg/devcontainer/config"
@@ -51,6 +53,35 @@ func TestNormalizeFeatureIDRemovesVersion(t *testing.T) {
 				t.Fatalf("expected %q, got %q", test.want, got)
 			}
 		})
+	}
+}
+
+func TestFeatureBuildUsesNPMRegistry(t *testing.T) {
+	featureFolder := t.TempDir()
+	err := os.WriteFile(featureFolder+"/install.sh", []byte("#!/bin/sh\n"), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buildInfo, err := getFeatureBuildOptions(t.TempDir(), &config.ImageBuildInfo{
+		User:     "root",
+		Metadata: &config.ImageMetadataConfig{},
+	}, "base", []*config.FeatureSet{
+		{
+			ConfigID: "example",
+			Folder:   featureFolder,
+			Config:   &config.FeatureConfig{},
+		},
+	}, "https://npm.example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if buildInfo.BuildArgs["_DEVPOD_NPM_REGISTRY"] != "https://npm.example.com/" {
+		t.Fatalf("expected npm registry build argument, got %#v", buildInfo.BuildArgs)
+	}
+	if !strings.Contains(buildInfo.DockerfileContent, `export NPM_CONFIG_REGISTRY="${_DEVPOD_NPM_REGISTRY}"`) {
+		t.Fatalf("expected feature install to export npm registry, got:\n%s", buildInfo.DockerfileContent)
 	}
 }
 

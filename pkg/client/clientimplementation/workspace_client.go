@@ -19,12 +19,13 @@ import (
 	"github.com/loft-sh/devpod/pkg/compress"
 	"github.com/loft-sh/devpod/pkg/config"
 	config2 "github.com/loft-sh/devpod/pkg/devcontainer/config"
+	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/npmconfig"
 	"github.com/loft-sh/devpod/pkg/options"
 	"github.com/loft-sh/devpod/pkg/provider"
 	"github.com/loft-sh/devpod/pkg/shell"
 	"github.com/loft-sh/devpod/pkg/ssh"
 	"github.com/loft-sh/devpod/pkg/types"
-	"github.com/loft-sh/devpod/pkg/log"
 	perrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -156,6 +157,16 @@ func (s *workspaceClient) AgentInfo(cliOptions provider.CLIOptions) (string, *pr
 }
 
 func (s *workspaceClient) compressedAgentInfo(cliOptions provider.CLIOptions) (string, *provider.AgentWorkspaceInfo, error) {
+	if cliOptions.NPMRegistry == "" {
+		registry, err := npmconfig.UserRegistry()
+		if err != nil {
+			s.log.Debugf("Unable to load npm registry from user config: %v", err)
+		} else if registry != "" {
+			s.log.Debug("Using npm registry from user config for devcontainer feature builds")
+			cliOptions.NPMRegistry = registry
+		}
+	}
+
 	agentInfo := s.agentInfo(cliOptions)
 
 	// marshal config

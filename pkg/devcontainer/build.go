@@ -49,7 +49,7 @@ func (r *runner) extendImage(
 	}
 
 	// get extend image build info
-	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, imageBase, parsedConfig, r.Log, options.ForceBuild)
+	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, imageBase, parsedConfig, r.Log, options.ForceBuild, options.NPMRegistry)
 	if err != nil {
 		return nil, errors.Wrap(err, "get extended build info")
 	}
@@ -107,7 +107,7 @@ func (r *runner) buildAndExtendImage(
 	}
 
 	// get extend image build info
-	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, imageBase, parsedConfig, r.Log, options.ForceBuild)
+	extendedBuildInfo, err := feature.GetExtendedBuildInfo(substitutionContext, imageBuildInfo, imageBase, parsedConfig, r.Log, options.ForceBuild, options.NPMRegistry)
 	if err != nil {
 		return nil, errors.Wrap(err, "get extended build info")
 	}
@@ -332,7 +332,7 @@ func (r *runner) buildDevImageCompose(
 		}
 	}
 
-	overrideBuildImageName, _, imageMetadata, _, err := r.buildAndExtendDockerCompose(ctx, parsedConfig, substitutionContext, project, composeHelper, &composeService, composeGlobalArgs)
+	overrideBuildImageName, _, imageMetadata, _, err := r.buildAndExtendDockerCompose(ctx, parsedConfig, substitutionContext, project, composeHelper, &composeService, composeGlobalArgs, options.NPMRegistry)
 	if err != nil {
 		return nil, errors.Wrap(err, "build and extend docker-compose")
 	}

@@ -26,6 +26,8 @@ FROM $_DEV_CONTAINERS_BASE_IMAGE AS dev_containers_target_stage
 
 USER root
 
+ARG _DEVPOD_NPM_REGISTRY
+
 COPY ./` + config.DevPodContextFeatureFolder + `/ /tmp/build-features/
 RUN chmod -R 0755 /tmp/build-features && ls /tmp/build-features
 
@@ -51,7 +53,7 @@ type BuildInfo struct {
 	BuildArgs               map[string]string
 }
 
-func GetExtendedBuildInfo(ctx *config.SubstitutionContext, imageBuildInfo *config.ImageBuildInfo, target string, devContainerConfig *config.SubstitutedConfig, log log.Logger, forceBuild bool) (*ExtendedBuildInfo, error) {
+func GetExtendedBuildInfo(ctx *config.SubstitutionContext, imageBuildInfo *config.ImageBuildInfo, target string, devContainerConfig *config.SubstitutedConfig, log log.Logger, forceBuild bool, npmRegistry string) (*ExtendedBuildInfo, error) {
 	features, err := fetchFeatures(devContainerConfig.Config, log, forceBuild)
 	if err != nil {
 		return nil, errors.Wrap(err, "fetch features")
@@ -76,7 +78,7 @@ func GetExtendedBuildInfo(ctx *config.SubstitutionContext, imageBuildInfo *confi
 	}
 
 	contextPath := config.GetContextPath(devContainerConfig.Config)
-	buildInfo, err := getFeatureBuildOptions(contextPath, imageBuildInfo, target, features)
+	buildInfo, err := getFeatureBuildOptions(contextPath, imageBuildInfo, target, features, npmRegistry)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +91,7 @@ func GetExtendedBuildInfo(ctx *config.SubstitutionContext, imageBuildInfo *confi
 	}, nil
 }
 
-func getFeatureBuildOptions(contextPath string, imageBuildInfo *config.ImageBuildInfo, target string, features []*config.FeatureSet) (*BuildInfo, error) {
+func getFeatureBuildOptions(contextPath string, imageBuildInfo *config.ImageBuildInfo, target string, features []*config.FeatureSet, npmRegistry string) (*BuildInfo, error) {
 	containerUser, remoteUser := findContainerUsers(imageBuildInfo.Metadata, "", imageBuildInfo.User)
 
 	// copy features
@@ -117,15 +119,20 @@ _REMOTE_USER=`+remoteUser+"\n"), 0600)
 # syntax=%s
 ARG _DEV_CONTAINERS_BASE_IMAGE=placeholder`, syntax)
 
+	buildArgs := map[string]string{
+		"_DEV_CONTAINERS_BASE_IMAGE": target,
+		"_DEV_CONTAINERS_IMAGE_USER": imageBuildInfo.User,
+	}
+	if npmRegistry != "" {
+		buildArgs["_DEVPOD_NPM_REGISTRY"] = npmRegistry
+	}
+
 	return &BuildInfo{
 		FeaturesFolder:          featureFolder,
 		DockerfileContent:       dockerfileContent,
 		DockerfilePrefixContent: dockerfilePrefix,
 		OverrideTarget:          "dev_containers_target_stage",
-		BuildArgs: map[string]string{
-			"_DEV_CONTAINERS_BASE_IMAGE": target,
-			"_DEV_CONTAINERS_IMAGE_USER": imageBuildInfo.User,
-		},
+		BuildArgs:               buildArgs,
 	}, nil
 }
 
@@ -178,6 +185,7 @@ echo "_REMOTE_USER_HOME=$(getent passwd ` + remoteUser + ` | cut -d: -f6)" >> /t
 		result += `
 RUN cd /tmp/build-features/` + strconv.Itoa(i) + ` \
 && chmod +x ./devcontainer-features-install.sh \
+&& { [ -z "${_DEVPOD_NPM_REGISTRY}" ] || export NPM_CONFIG_REGISTRY="${_DEVPOD_NPM_REGISTRY}"; } \
 && ./devcontainer-features-install.sh
 
 `
