@@ -33,6 +33,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/ide/vscode"
 	"github.com/loft-sh/devpod/pkg/ide/zed"
 	"github.com/loft-sh/devpod/pkg/log"
+	"github.com/loft-sh/devpod/pkg/npmconfig"
 	open2 "github.com/loft-sh/devpod/pkg/open"
 	"github.com/loft-sh/devpod/pkg/port"
 	provider2 "github.com/loft-sh/devpod/pkg/provider"
@@ -1155,6 +1156,16 @@ func buildDotCmd(devPodConfig *config.Config, dotfilesRepo, dotfilesScript strin
 	// Collect file-based and CLI options env variables names (aka keys) and
 	// configure ssh env var passthrough with send-env
 	allEnvKeyValuesPairs := slices.Concat(envFilesKeyValuePairs, envKeyValuePairs)
+	if !containsEnvKey(allEnvKeyValuesPairs, "NPM_CONFIG_REGISTRY") {
+		registry, err := npmconfig.UserRegistry()
+		if err != nil {
+			log.Debugf("Unable to load npm registry from user config for dotfiles: %v", err)
+		} else if registry != "" {
+			log.Debug("Using npm registry from user config for dotfiles")
+			allEnvKeyValuesPairs = addNPMRegistryEnv(allEnvKeyValuesPairs, registry)
+		}
+	}
+
 	allEnvKeys := extractKeysFromEnvKeyValuePairs(allEnvKeyValuesPairs)
 	for _, envKey := range allEnvKeys {
 		sshCmd = append(sshCmd, "--send-env", envKey)
@@ -1188,6 +1199,23 @@ func buildDotCmd(devPodConfig *config.Config, dotfilesRepo, dotfilesScript strin
 
 	dotCmd.Env = append(dotCmd.Environ(), allEnvKeyValuesPairs...)
 	return dotCmd, nil
+}
+
+func addNPMRegistryEnv(envKeyValuePairs []string, registry string) []string {
+	if registry == "" || containsEnvKey(envKeyValuePairs, "NPM_CONFIG_REGISTRY") {
+		return envKeyValuePairs
+	}
+	return append(envKeyValuePairs, "NPM_CONFIG_REGISTRY="+registry)
+}
+
+func containsEnvKey(envKeyValuePairs []string, key string) bool {
+	for _, env := range envKeyValuePairs {
+		envKey, _, found := strings.Cut(env, "=")
+		if found && strings.EqualFold(envKey, key) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractKeysFromEnvKeyValuePairs(envKeyValuePairs []string) []string {
